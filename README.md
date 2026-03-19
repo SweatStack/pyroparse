@@ -1,12 +1,13 @@
 # Pyroparse
 
-> Fast and opinionated activity data parsing. Forged in Rust. Fired up in Python.
+## *Fast and opinionated activity data parsing. Forged in Rust. Fired up in Python.*
 
-Pyroparse reads FIT files and gives you a typed [PyArrow](https://arrow.apache.org/docs/python/) table with structured metadata — ~20x faster than pure-Python parsers. It standardizes the mess of manufacturer-specific field names into a clean, consistent schema. It round-trips to Parquet with metadata preserved. And it hands you Arrow memory that Polars, DuckDB, and pandas can consume with zero-copy.
+Pyroparse reads FIT files and gives you a typed [PyArrow](https://arrow.apache.org/docs/python/) table with structured metadata. This Rust-backed parser loads a typical activity in 15 ms (see [benchmark](BENCHMARK.md)), which is roughly 20x faster than pure-Python FIT parsers. It standardizes the mess of manufacturer-specific field names into a clean, consistent schema. It round-trips to Parquet with metadata preserved. And it hands you Arrow memory that Polars, DuckDB, and pandas can consume with zero-copy.
 
 **Parse. Standardize. Serialize. Analyze.** One library, no glue code.
 
-> **Note:** Pyroparse is experimental and not ready for production use. APIs may change without notice.
+> [!WARNING]
+> Pyroparse is experimental and not ready for production use. APIs may change without notice.
 
 ---
 
@@ -40,14 +41,14 @@ activity.metadata.devices       # [Device(manufacturer="garmin", product="edge_5
 activity.data                   # pyarrow.Table — 21,666 rows × 7 typed columns
 ```
 
-### FIT → Parquet
+### FIT to Parquet
 
 ```python
 activity = pp.Activity.load_fit("ride.fit")
 activity.to_parquet("ride.parquet")  # ZSTD compressed, metadata preserved
 ```
 
-Load it back — data and metadata intact:
+Load it back with data and metadata intact:
 
 ```python
 loaded = pp.Activity.load_parquet("ride.parquet")
@@ -60,7 +61,7 @@ loaded.data.num_rows       # 21,666
 
 ## Standardized schema
 
-FIT files are a mess. `enhanced_speed` vs `speed`, semicircle-encoded GPS, manufacturer-specific field names — pyroparse normalizes all of it into a single, opinionated schema with purpose-chosen Arrow types:
+FIT files are a mess. `enhanced_speed` vs `speed`, semicircle-encoded GPS, manufacturer-specific field names. Pyroparse normalizes all of it into a single, opinionated schema with purpose-chosen Arrow types:
 
 | Column | Arrow Type | Notes |
 |--------|-----------|-------|
@@ -72,10 +73,10 @@ FIT files are a mess. `enhanced_speed` vs `speed`, semicircle-encoded GPS, manuf
 | `position_lat` | `Float64` | Degrees, converted from semicircles. Sub-meter precision. |
 | `position_long` | `Float64` | |
 
-These types are native across the ecosystem — no casting, no surprises:
+These types are native across the ecosystem, no casting, no surprises:
 
 ```python
-# DuckDB — direct Arrow scan
+# DuckDB: direct Arrow scan
 import duckdb
 duckdb.from_arrow(activity.data).filter("power > 300").fetchdf()
 ```
@@ -84,7 +85,7 @@ duckdb.from_arrow(activity.data).filter("power > 300").fetchdf()
 
 ## Structured metadata
 
-Metadata is extracted from FIT Session and DeviceInfo messages — the same source Garmin Connect and Strava use. Sport, timestamps, duration, distance, device info, available metrics — all parsed into a typed dataclass, not left as raw dicts for you to dig through.
+Metadata is extracted from FIT Session and DeviceInfo messages, the same source Garmin Connect and Strava use. Sport, timestamps, duration, distance, device info, available metrics: all parsed into a typed dataclass, not left as raw dicts for you to dig through.
 
 ```python
 @dataclass
@@ -126,20 +127,23 @@ WHERE key = 'pyroparse'
 
 ## Batch operations
 
-Scan a directory of `.fit` files, filter by metadata, load only what you need:
+Scan a directory of `.fit` or `.parquet` files, filter by metadata, load only what you need:
 
 ```python
 import pyroparse as pp
 
-# Scan — metadata only, no timeseries parsing (fast)
+# Scan: metadata only, no timeseries parsing (fast)
 catalog = pp.scan_fit("~/data/activities/")
 # file_path | sport | start_time | duration | distance | metrics | ...
+
+# Same API for Parquet (reads schema footers only)
+catalog = pp.scan_parquet("~/data/parquet/")
 
 # Filter with PyArrow compute
 import pyarrow.compute as pc
 cycling = catalog.filter(pc.field("sport") == "cycling.road")
 
-# Load — only the files and columns you need
+# Load only the files and columns you need
 paths = cycling.column("file_path").to_pylist()
 data = pp.load_fit_batch(paths, columns=["timestamp", "power", "heart_rate"])
 # file_path | timestamp | power | heart_rate
@@ -147,13 +151,13 @@ data = pp.load_fit_batch(paths, columns=["timestamp", "power", "heart_rate"])
 
 ### Column selection
 
-All loaders accept a `columns` parameter to keep only the data you need. For Parquet files, this pushes down to the reader and skips column chunks entirely. For FIT and CSV, it reduces memory by dropping unwanted columns after parse.
+All loaders accept a `columns` parameter to keep only the data you need. For Parquet files, this pushes down to the reader and skips column chunks entirely. For FIT and CSV, it drops unwanted columns after parse.
 
 ```python
-# Single file — only timestamp and power
+# Single file: only timestamp and power
 table = pp.read_fit("ride.fit", columns=["timestamp", "power"])
 
-# Parquet — true column pushdown, skips unused data on disk
+# Parquet: true column pushdown, skips unused data on disk
 activity = pp.Activity.load_parquet("ride.parquet", columns=["timestamp", "speed"])
 ```
 
@@ -182,7 +186,7 @@ data = ppdb.load_fit(paths, columns=["timestamp", "power"])
 data.filter("power > 300").fetchdf()
 ```
 
-> **Note:** `polars` and `duckdb` are optional dependencies — install them separately.
+> **Note:** `polars` and `duckdb` are optional dependencies, install them separately.
 
 ---
 
@@ -197,7 +201,7 @@ session.activities[1].metadata.sport  # "cycling"
 session.activities[2].metadata.sport  # "running"
 ```
 
-`Activity.load_fit()` raises `MultipleActivitiesError` for multi-activity files — no silent data loss.
+`Activity.load_fit()` raises `MultipleActivitiesError` for multi-activity files, no silent data loss.
 
 ---
 
@@ -230,7 +234,7 @@ maturin develop --release
 
 ### Docker
 
-A minimal HTTP server for FIT → Parquet/CSV conversion:
+A minimal HTTP server for FIT to Parquet/CSV conversion:
 
 ```bash
 docker build -t pyroparse .
