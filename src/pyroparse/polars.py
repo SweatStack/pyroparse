@@ -33,6 +33,20 @@ def scan_fit(
     return pl.from_arrow(pyroparse.scan_fit(path, recursive=recursive, errors=errors))
 
 
+def scan_parquet(
+    path: str,
+    *,
+    recursive: bool = True,
+    errors: str = "warn",
+) -> pl.DataFrame:
+    """Scan a directory for ``.parquet`` files and return a Polars DataFrame catalog.
+
+    Same schema as :func:`scan_fit` — only the Parquet schema footer is
+    read, no row data is loaded.
+    """
+    return pl.from_arrow(pyroparse.scan_parquet(path, recursive=recursive, errors=errors))
+
+
 @pl.api.register_dataframe_namespace("fit")
 class FitNamespace:
     """Polars DataFrame namespace for pyroparse operations."""

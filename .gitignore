@@ -19,5 +19,13 @@ target/
 .idea/
 .vscode/
 
+# Data
+data/
+
 # Other
 .DS_Store
+
+# AI agents/skills
+.agents/
+.claude/
+skills-lock.json

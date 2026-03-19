@@ -1,4 +1,4 @@
-"""Batch operations for scanning and loading directories of FIT files."""
+"""Batch operations for scanning and loading directories of activity files."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pyarrow as pa
 from pyroparse._activity import Activity
 
 # ---------------------------------------------------------------------------
-# Catalog schema for scan_fit
+# Catalog schema (shared by scan_fit and scan_parquet)
 # ---------------------------------------------------------------------------
 
 _CATALOG_SCHEMA = pa.schema([
@@ -89,6 +89,87 @@ def scan_fit(
 def _scan_one(path: Path) -> dict:
     activity = Activity.open_fit(path)
     meta = activity.metadata
+    creator = next(
+        (d for d in meta.devices if d.device_type == "creator"), None
+    )
+    return {
+        "file_path": str(path),
+        "sport": meta.sport,
+        "name": meta.name,
+        "start_time": meta.start_time,
+        "start_time_local": meta.start_time_local,
+        "duration": meta.duration,
+        "distance": meta.distance,
+        "metrics": sorted(meta.metrics) if meta.metrics else None,
+        "device_name": creator.name if creator else None,
+        "device_type": creator.device_type if creator else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# scan_parquet
+# ---------------------------------------------------------------------------
+
+def scan_parquet(
+    path: str,
+    *,
+    recursive: bool = True,
+    errors: str = "warn",
+) -> pa.Table:
+    """Scan a directory for ``.parquet`` files and return a catalog table.
+
+    Each row represents one file.  Only the Parquet schema footer is read
+    — no row data is loaded, making this very fast even for large
+    directories.
+
+    Returns the same schema as :func:`scan_fit`, so downstream code
+    (filtering, aggregation, integration with Polars/DuckDB) works
+    identically regardless of source format.
+
+    Parameters
+    ----------
+    path : str
+        Directory to scan.
+    recursive : bool
+        If ``True`` (default), search subdirectories (``**/*.parquet``).
+    errors : str
+        ``"warn"`` (default) skips unreadable files with a warning.
+        ``"raise"`` fails immediately on the first error.
+    """
+    root = Path(path).expanduser().resolve()
+    pattern = "**/*.parquet" if recursive else "*.parquet"
+    pq_files = sorted(root.glob(pattern))
+
+    if not pq_files:
+        return _CATALOG_SCHEMA.empty_table()
+
+    # Sequential — each pq.read_schema() call is ~0.1 ms (just reads
+    # the footer), so ThreadPoolExecutor overhead would dominate.
+    rows: list[dict] = []
+    for f in pq_files:
+        try:
+            rows.append(_scan_one_parquet(f))
+        except Exception as exc:
+            if errors == "raise":
+                raise
+            warnings.warn(
+                f"Skipping {f}: {exc}",
+                stacklevel=2,
+            )
+
+    if not rows:
+        return _CATALOG_SCHEMA.empty_table()
+
+    return pa.table(
+        {col: [r[col] for r in rows] for col in _CATALOG_SCHEMA.names},
+        schema=_CATALOG_SCHEMA,
+    )
+
+
+def _scan_one_parquet(path: Path) -> dict:
+    from pyroparse._parquet import read_parquet_metadata
+
+    meta = read_parquet_metadata(path)
     creator = next(
         (d for d in meta.devices if d.device_type == "creator"), None
     )

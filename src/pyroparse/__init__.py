@@ -8,7 +8,7 @@ from typing import BinaryIO
 import pyarrow as pa
 
 from pyroparse._activity import Activity
-from pyroparse._batch import load_fit_batch, scan_fit
+from pyroparse._batch import load_fit_batch, scan_fit, scan_parquet
 from pyroparse._errors import MultipleActivitiesError
 from pyroparse._metadata import ActivityMetadata, Device
 from pyroparse._session import Session
@@ -27,6 +27,7 @@ __all__ = [
     "read_fit",
     "read_parquet",
     "scan_fit",
+    "scan_parquet",
 ]
 
 Source = str | os.PathLike[str] | bytes | BinaryIO

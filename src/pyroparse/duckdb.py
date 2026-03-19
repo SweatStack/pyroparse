@@ -56,6 +56,35 @@ def scan_fit(
     return con.from_arrow(table)
 
 
+def scan_parquet(
+    path: str,
+    *,
+    recursive: bool = True,
+    errors: str = "warn",
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> duckdb.DuckDBPyRelation:
+    """Scan a directory for ``.parquet`` files and return a DuckDB relation.
+
+    Same schema as :func:`scan_fit` — only the Parquet schema footer is
+    read, no row data is loaded.
+
+    Parameters
+    ----------
+    path : str
+        Directory to scan.
+    recursive : bool
+        Search subdirectories (default ``True``).
+    errors : str
+        ``"warn"`` (default) or ``"raise"``.
+    con : DuckDBPyConnection | None
+        DuckDB connection. Uses the default connection if ``None``.
+    """
+    if con is None:
+        con = duckdb.default_connection
+    table = pyroparse.scan_parquet(path, recursive=recursive, errors=errors)
+    return con.from_arrow(table)
+
+
 def load_fit(
     paths: list[str],
     *,
