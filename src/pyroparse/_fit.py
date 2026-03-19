@@ -2,19 +2,37 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+from typing import BinaryIO
 
 import pyarrow as pa
 
 from pyroparse._core import parse_fit as _parse_fit
+from pyroparse._core import parse_fit_bytes as _parse_fit_bytes
+from pyroparse._core import parse_fit_metadata as _parse_fit_metadata
 from pyroparse._errors import MultipleActivitiesError
 from pyroparse._metadata import ActivityMetadata, Device, merge_metadata
 
+Source = str | os.PathLike[str] | bytes | BinaryIO
+
+
+def _call_parser(source: Source) -> dict:
+    """Route to the path-based or bytes-based Rust parser."""
+    if isinstance(source, (str, os.PathLike)):
+        return _parse_fit(str(os.fspath(source)))
+    if isinstance(source, bytes):
+        return _parse_fit_bytes(source)
+    return _parse_fit_bytes(source.read())
+
+
+# ---------------------------------------------------------------------------
+# Eager loading
+# ---------------------------------------------------------------------------
 
 def load_fit(
-    source: str | os.PathLike[str], *, metadata: dict | None = None
+    source: Source, *, metadata: dict | None = None
 ) -> tuple[pa.Table, ActivityMetadata]:
     """Parse a FIT file and return (data, metadata) for a single activity."""
-    raw = _parse_fit(str(os.fspath(source)))
+    raw = _call_parser(source)
     activities = raw["activities"]
 
     if len(activities) > 1:
@@ -27,10 +45,10 @@ def load_fit(
 
 
 def load_fit_multi(
-    source: str | os.PathLike[str],
+    source: Source,
 ) -> list[tuple[pa.Table, ActivityMetadata]]:
     """Parse a multi-activity FIT file into a list of (data, metadata) pairs."""
-    raw = _parse_fit(str(os.fspath(source)))
+    raw = _call_parser(source)
     return [
         (
             pa.Table.from_batches([a["records"]]),
@@ -40,6 +58,36 @@ def load_fit_multi(
     ]
 
 
+# ---------------------------------------------------------------------------
+# Metadata-only (for lazy loading)
+# ---------------------------------------------------------------------------
+
+def load_fit_metadata(
+    path: str | os.PathLike[str], *, metadata: dict | None = None
+) -> ActivityMetadata:
+    """Scan a FIT file for metadata without decoding record data."""
+    raw = _parse_fit_metadata(str(os.fspath(path)))
+    activities = raw["activities"]
+
+    if len(activities) > 1:
+        raise MultipleActivitiesError(len(activities))
+
+    file_meta = _build_metadata(activities[0]["metadata"])
+    return merge_metadata(file_meta, metadata)
+
+
+def load_fit_metadata_multi(
+    path: str | os.PathLike[str],
+) -> list[ActivityMetadata]:
+    """Scan a multi-activity FIT file for metadata only."""
+    raw = _parse_fit_metadata(str(os.fspath(path)))
+    return [_build_metadata(a["metadata"]) for a in raw["activities"]]
+
+
+# ---------------------------------------------------------------------------
+# Raw dict → ActivityMetadata
+# ---------------------------------------------------------------------------
+
 def _build_metadata(raw: dict) -> ActivityMetadata:
     start_time = None
     if raw.get("start_time") is not None:
@@ -47,7 +95,6 @@ def _build_metadata(raw: dict) -> ActivityMetadata:
 
     start_time_local = None
     if raw.get("start_time_local") is not None:
-        # local_timestamp is stored as UTC seconds representing local wall-clock time.
         ts = datetime.fromtimestamp(raw["start_time_local"], tz=timezone.utc)
         start_time_local = ts.replace(tzinfo=None)
 

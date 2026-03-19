@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
+from typing import BinaryIO
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -10,9 +11,24 @@ import pyarrow.parquet as pq
 from pyroparse._metadata import ActivityMetadata, Device
 from pyroparse._schema import METADATA_KEY, PARQUET_COMPRESSION, PARQUET_COMPRESSION_LEVEL
 
+Source = str | os.PathLike[str] | bytes | BinaryIO
+
+
+def _resolve_source(source: Source) -> str | pa.BufferReader | BinaryIO:
+    """Normalize a source into something PyArrow can read."""
+    if isinstance(source, (str, os.PathLike)):
+        return str(os.fspath(source))
+    if isinstance(source, bytes):
+        return pa.BufferReader(source)
+    return source
+
+
+# ---------------------------------------------------------------------------
+# Read / write
+# ---------------------------------------------------------------------------
 
 def write_parquet(
-    path: str | os.PathLike[str],
+    path: str | os.PathLike[str] | BinaryIO,
     data: pa.Table,
     metadata: ActivityMetadata,
 ) -> None:
@@ -21,19 +37,18 @@ def write_parquet(
     existing = data.schema.metadata or {}
     combined = {**existing, METADATA_KEY: meta_json}
     table = data.replace_schema_metadata(combined)
+    dest = str(path) if isinstance(path, (str, os.PathLike)) else path
     pq.write_table(
         table,
-        str(path),
+        dest,
         compression=PARQUET_COMPRESSION,
         compression_level=PARQUET_COMPRESSION_LEVEL,
     )
 
 
-def read_parquet(
-    source: str | os.PathLike[str],
-) -> tuple[pa.Table, ActivityMetadata]:
+def read_parquet(source: Source) -> tuple[pa.Table, ActivityMetadata]:
     """Read a Parquet file and extract pyroparse metadata from the schema."""
-    table = pq.read_table(str(source))
+    table = pq.read_table(_resolve_source(source))
     schema_meta = table.schema.metadata or {}
 
     if METADATA_KEY in schema_meta:
@@ -41,14 +56,22 @@ def read_parquet(
     else:
         metadata = ActivityMetadata()
 
-    # Strip our key so activity.data is clean.
     clean = {k: v for k, v in schema_meta.items() if k != METADATA_KEY}
     table = table.replace_schema_metadata(clean or None)
     return table, metadata
 
 
+def read_parquet_metadata(path: str | os.PathLike[str]) -> ActivityMetadata:
+    """Read only the Parquet schema footer — no row data loaded."""
+    schema = pq.read_schema(str(os.fspath(path)))
+    meta = schema.metadata or {}
+    if METADATA_KEY in meta:
+        return _json_to_metadata(meta[METADATA_KEY])
+    return ActivityMetadata()
+
+
 # ---------------------------------------------------------------------------
-# Serialization
+# JSON serialization
 # ---------------------------------------------------------------------------
 
 def _metadata_to_json(meta: ActivityMetadata) -> bytes:

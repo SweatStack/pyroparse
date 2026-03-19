@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+from typing import BinaryIO
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -10,12 +11,20 @@ import pyarrow.csv as pcsv
 from pyroparse._metadata import ActivityMetadata
 from pyroparse._schema import GPS_COLUMNS, METRIC_COLUMNS
 
+Source = str | os.PathLike[str] | bytes | BinaryIO
 
-def read_csv(
-    source: str | os.PathLike[str],
-) -> tuple[pa.Table, ActivityMetadata]:
+
+def _resolve_source(source: Source) -> str | pa.BufferReader | BinaryIO:
+    if isinstance(source, (str, os.PathLike)):
+        return str(os.fspath(source))
+    if isinstance(source, bytes):
+        return pa.BufferReader(source)
+    return source
+
+
+def read_csv(source: Source) -> tuple[pa.Table, ActivityMetadata]:
     """Read a CSV file and infer metadata from the data."""
-    table = pcsv.read_csv(str(source))
+    table = pcsv.read_csv(_resolve_source(source))
     table = _cast_timestamp(table)
     table, promoted = _promote_constants(table)
     metadata = _infer_metadata(table, promoted)
@@ -27,14 +36,18 @@ def _cast_timestamp(table: pa.Table) -> pa.Table:
     if "timestamp" not in table.column_names:
         return table
     col = table.column("timestamp")
-    if pa.types.is_string(col.type) or pa.types.is_large_string(col.type):
-        try:
-            cast = pc.cast(pc.assume_timezone(pc.strptime(col, "%Y-%m-%dT%H:%M:%S.%fZ", "us"), timezone="UTC"), pa.timestamp("us", tz="UTC"))
-            idx = table.column_names.index("timestamp")
-            table = table.set_column(idx, pa.field("timestamp", pa.timestamp("us", tz="UTC")), cast)
-        except Exception:
-            pass
-    return table
+    if not (pa.types.is_string(col.type) or pa.types.is_large_string(col.type)):
+        return table
+    try:
+        parsed = pc.strptime(col, "%Y-%m-%dT%H:%M:%S.%fZ", "us")
+        aware = pc.assume_timezone(parsed, timezone="UTC")
+        cast = pc.cast(aware, pa.timestamp("us", tz="UTC"))
+        idx = table.column_names.index("timestamp")
+        return table.set_column(
+            idx, pa.field("timestamp", pa.timestamp("us", tz="UTC")), cast
+        )
+    except Exception:
+        return table
 
 
 def _promote_constants(table: pa.Table) -> tuple[pa.Table, dict]:

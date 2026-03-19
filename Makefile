@@ -1,3 +1,5 @@
+unexport CONDA_PREFIX
+
 .PHONY: test build
 
 test:
