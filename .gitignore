@@ -18,3 +18,6 @@ target/
 # IDE
 .idea/
 .vscode/
+
+# Other
+.DS_Store

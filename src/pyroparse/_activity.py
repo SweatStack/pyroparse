@@ -71,7 +71,12 @@ class Activity:
 
     @classmethod
     def open_fit(cls, path: PathSource, *, metadata: dict | None = None) -> Activity:
-        """Load metadata now, defer record data until ``.data`` is accessed."""
+        """Load metadata now, defer record data until ``.data`` is accessed.
+
+        Experimental: uses a custom binary FIT scanner that may not handle
+        all edge cases. Metadata values should be validated against
+        ``load_fit()`` for critical workflows.
+        """
         from pyroparse._fit import load_fit, load_fit_metadata
 
         resolved = os.fspath(path)

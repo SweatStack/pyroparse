@@ -6,6 +6,8 @@ Pyroparse reads FIT files and gives you a typed [PyArrow](https://arrow.apache.o
 
 **Parse. Standardize. Serialize. Analyze.** One library, no glue code.
 
+> **Note:** Pyroparse is experimental and not ready for production use. APIs may change without notice.
+
 ---
 
 ## Quick start
