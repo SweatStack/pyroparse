@@ -87,6 +87,7 @@ def _metadata_to_json(meta: ActivityMetadata) -> bytes:
         "metrics": sorted(meta.metrics),
         "devices": [
             {
+                "name": d.name,
                 "manufacturer": d.manufacturer,
                 "product": d.product,
                 "serial_number": d.serial_number,
@@ -115,6 +116,7 @@ def _json_to_metadata(raw: bytes) -> ActivityMetadata:
 
     devices = [
         Device(
+            name=d.get("name"),
             manufacturer=d.get("manufacturer"),
             product=d.get("product"),
             serial_number=d.get("serial_number"),

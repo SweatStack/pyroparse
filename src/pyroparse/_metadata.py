@@ -6,10 +6,11 @@ from datetime import datetime
 
 @dataclass
 class Device:
+    name: str | None = None
     manufacturer: str | None = None
     product: str | None = None
     serial_number: str | None = None
-    device_type: str | None = None
+    device_type: str | None = None  # "creator" or "sensor"
 
 
 @dataclass

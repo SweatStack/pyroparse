@@ -118,7 +118,7 @@ struct DeviceMeta {
     manufacturer: Option<String>,
     product: Option<String>,
     serial_number: Option<String>,
-    device_type: Option<String>,
+    device_index: Option<u8>,
 }
 
 struct ParseResult {
@@ -201,8 +201,13 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                             device.serial_number =
                                 value_to_f64(field.value()).map(|v| format!("{v:.0}"))
                         }
-                        "device_type" | "source_type" => {
-                            device.device_type = value_to_string(field.value())
+                        "device_index" => {
+                            device.device_index = match field.value() {
+                                Value::UInt8(v) => Some(*v),
+                                Value::String(s) if s == "creator" => Some(0),
+                                Value::String(s) => s.parse().ok(),
+                                _ => value_to_f64(field.value()).map(|v| v as u8),
+                            }
                         }
                         _ => {}
                     }
@@ -327,7 +332,7 @@ fn device_to_dict<'py>(
     dict.set_item("manufacturer", device.manufacturer.as_deref())?;
     dict.set_item("product", device.product.as_deref())?;
     dict.set_item("serial_number", device.serial_number.as_deref())?;
-    dict.set_item("device_type", device.device_type.as_deref())?;
+    dict.set_item("device_index", device.device_index)?;
     Ok(dict)
 }
 
@@ -449,6 +454,7 @@ const SESSION_TIMESTAMP: u8 = 253;
 const ACTIVITY_LOCAL_TIMESTAMP: u8 = 5;
 
 // DeviceInfo field definition numbers
+const DEVICE_INDEX: u8 = 0;
 const DEVICE_MANUFACTURER: u8 = 2;
 const DEVICE_SERIAL_NUMBER: u8 = 3;
 const DEVICE_PRODUCT_NAME: u8 = 27;
@@ -826,6 +832,9 @@ impl<'a> FitScanner<'a> {
         let mut d = DeviceMeta::default();
         for (num, data) in fields {
             match *num {
+                DEVICE_INDEX if !data.is_empty() && data[0] != 0xFF => {
+                    d.device_index = Some(data[0]);
+                }
                 DEVICE_MANUFACTURER if data.len() >= 2 => {
                     let v = read_u16(data, big_endian);
                     if v != 0xFFFF {

@@ -98,15 +98,9 @@ def _build_metadata(raw: dict) -> ActivityMetadata:
         ts = datetime.fromtimestamp(raw["start_time_local"], tz=timezone.utc)
         start_time_local = ts.replace(tzinfo=None)
 
-    devices = [
-        Device(
-            manufacturer=d.get("manufacturer"),
-            product=d.get("product"),
-            serial_number=d.get("serial_number"),
-            device_type=d.get("device_type"),
-        )
-        for d in raw.get("devices", [])
-    ]
+    devices = _deduplicate_devices(
+        [_build_device(d) for d in raw.get("devices", [])]
+    )
 
     extra = {}
     if raw.get("sub_sport"):
@@ -122,4 +116,32 @@ def _build_metadata(raw: dict) -> ActivityMetadata:
         metrics=set(raw.get("metrics", [])),
         devices=devices,
         extra=extra,
+    )
+
+
+def _deduplicate_devices(devices: list[Device]) -> list[Device]:
+    seen: set[str] = set()
+    result: list[Device] = []
+    for d in devices:
+        key = d.serial_number or d.name or ""
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        result.append(d)
+    return result
+
+
+def _build_device(raw: dict) -> Device:
+    manufacturer = raw.get("manufacturer")
+    product = raw.get("product")
+    parts = [p for p in (manufacturer, product) if p]
+    name = " ".join(parts) if parts else None
+    is_creator = raw.get("device_index") == 0
+    return Device(
+        name=name,
+        manufacturer=manufacturer,
+        product=product,
+        serial_number=raw.get("serial_number"),
+        device_type="creator" if is_creator else "sensor",
     )
