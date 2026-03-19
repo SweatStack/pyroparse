@@ -14,7 +14,7 @@ class TestLoadFitFromBytes:
         assert Activity.load_fit(fit_path.read_bytes()).data.num_rows == 21_666
 
     def test_metadata(self, fit_path):
-        assert Activity.load_fit(fit_path.read_bytes()).metadata.sport == "cycling"
+        assert Activity.load_fit(fit_path.read_bytes()).metadata.sport == "cycling.road"
 
 
 class TestLoadFitFromFileObject:
@@ -34,7 +34,7 @@ class TestLoadParquetFromBytes:
         assert Activity.load_parquet(parquet_bytes).data.num_rows == 21_666
 
     def test_metadata(self, parquet_bytes):
-        assert Activity.load_parquet(parquet_bytes).metadata.sport == "cycling"
+        assert Activity.load_parquet(parquet_bytes).metadata.sport == "cycling.road"
 
 
 class TestLoadParquetFromFileObject:

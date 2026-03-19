@@ -8,7 +8,7 @@ name = "_core"
 crate-type = ["cdylib"]
 
 [dependencies]
-fitparser = "0.7"
+fitparser = "0.10"
 pyo3 = { version = "0.22", features = ["extension-module"] }
 arrow = { version = "53", default-features = false }
 pyo3-arrow = "0.5"

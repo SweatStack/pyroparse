@@ -11,6 +11,7 @@ from pyroparse._core import parse_fit_bytes as _parse_fit_bytes
 from pyroparse._core import parse_fit_metadata as _parse_fit_metadata
 from pyroparse._errors import MultipleActivitiesError
 from pyroparse._metadata import ActivityMetadata, Device, merge_metadata
+from pyroparse._sport import classify_sport
 
 Source = str | os.PathLike[str] | bytes | BinaryIO
 
@@ -102,18 +103,26 @@ def _build_metadata(raw: dict) -> ActivityMetadata:
         [_build_device(d) for d in raw.get("devices", [])]
     )
 
+    metrics = set(raw.get("metrics", []))
+    sport_raw = raw.get("sport")
+    sub_sport_raw = raw.get("sub_sport")
+
     extra = {}
-    if raw.get("sub_sport"):
-        extra["sub_sport"] = raw["sub_sport"]
+    if sub_sport_raw:
+        extra["sub_sport"] = sub_sport_raw
+
+    sport_category = classify_sport(
+        sport_raw, sub_sport_raw, has_gps="gps" in metrics,
+    )
 
     return ActivityMetadata(
-        sport=raw.get("sport"),
+        sport=str(sport_category),
         name=raw.get("name"),
         start_time=start_time,
         start_time_local=start_time_local,
         duration=raw.get("duration"),
         distance=raw.get("distance"),
-        metrics=set(raw.get("metrics", [])),
+        metrics=metrics,
         devices=devices,
         extra=extra,
     )

@@ -9,7 +9,7 @@ class TestOpenFit:
         assert isinstance(Activity.open_fit(fit_path), Activity)
 
     def test_metadata_sport(self, fit_path):
-        assert Activity.open_fit(fit_path).metadata.sport == "cycling"
+        assert Activity.open_fit(fit_path).metadata.sport == "cycling.road"
 
     def test_metadata_start_time(self, fit_path):
         meta = Activity.open_fit(fit_path).metadata
@@ -51,7 +51,7 @@ class TestOpenFit:
         assert abs(scanned.metadata.distance - full.metadata.distance) < 1.0
 
     def test_accepts_string_path(self, fit_path):
-        assert Activity.open_fit(str(fit_path)).metadata.sport == "cycling"
+        assert Activity.open_fit(str(fit_path)).metadata.sport == "cycling.road"
 
 
 class TestOpenParquet:
@@ -64,7 +64,7 @@ class TestOpenParquet:
         assert isinstance(Activity.open_parquet(parquet_path), Activity)
 
     def test_metadata_sport(self, parquet_path):
-        assert Activity.open_parquet(parquet_path).metadata.sport == "cycling"
+        assert Activity.open_parquet(parquet_path).metadata.sport == "cycling.road"
 
     def test_data_loads_on_access(self, parquet_path):
         assert Activity.open_parquet(parquet_path).data.num_rows == 21_666
@@ -74,7 +74,7 @@ class TestOpenParquet:
         assert activity.metadata.sport == "gravel"
 
     def test_accepts_string_path(self, parquet_path):
-        assert Activity.open_parquet(str(parquet_path)).metadata.sport == "cycling"
+        assert Activity.open_parquet(str(parquet_path)).metadata.sport == "cycling.road"
 
 
 class TestSessionOpenFit:
@@ -85,7 +85,7 @@ class TestSessionOpenFit:
         assert len(Session.open_fit(fit_path).activities) == 1
 
     def test_metadata_available(self, fit_path):
-        assert Session.open_fit(fit_path).activities[0].metadata.sport == "cycling"
+        assert Session.open_fit(fit_path).activities[0].metadata.sport == "cycling.road"
 
     def test_data_loads_on_access(self, fit_path):
         assert Session.open_fit(fit_path).activities[0].data.num_rows == 21_666

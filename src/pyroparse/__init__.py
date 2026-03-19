@@ -11,6 +11,7 @@ from pyroparse._activity import Activity
 from pyroparse._errors import MultipleActivitiesError
 from pyroparse._metadata import ActivityMetadata, Device
 from pyroparse._session import Session
+from pyroparse._sport import Sport, classify_sport
 
 __all__ = [
     "Activity",
@@ -18,6 +19,8 @@ __all__ = [
     "Device",
     "MultipleActivitiesError",
     "Session",
+    "Sport",
+    "classify_sport",
     "read_csv",
     "read_fit",
     "read_parquet",

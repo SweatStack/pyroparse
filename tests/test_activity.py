@@ -13,6 +13,11 @@ EXPECTED_COLUMNS = {
     "cadence",
     "position_lat",
     "position_long",
+    "altitude",
+    "temperature",
+    "distance",
+    "core_temperature",
+    "smo2",
 }
 
 EXPECTED_STATS = {
@@ -78,7 +83,7 @@ class TestLoadFit:
 class TestMetadata:
     def test_sport(self, fit_path):
         activity = Activity.load_fit(fit_path)
-        assert activity.metadata.sport == "cycling"
+        assert activity.metadata.sport == "cycling.road"
 
     def test_start_time_is_utc(self, fit_path):
         activity = Activity.load_fit(fit_path)
@@ -113,7 +118,7 @@ class TestMetadata:
     def test_override_preserves_file_metadata(self, fit_path):
         activity = Activity.load_fit(fit_path, metadata={"name": "Morning Ride"})
         assert activity.metadata.name == "Morning Ride"
-        assert activity.metadata.sport == "cycling"
+        assert activity.metadata.sport == "cycling.road"
 
 
 class TestRepr:
@@ -121,7 +126,7 @@ class TestRepr:
         assert "21,666" in repr(Activity.load_fit(fit_path))
 
     def test_contains_column_count(self, fit_path):
-        assert "7 columns" in repr(Activity.load_fit(fit_path))
+        assert "12 columns" in repr(Activity.load_fit(fit_path))
 
     def test_contains_sport(self, fit_path):
         assert "cycling" in repr(Activity.load_fit(fit_path))

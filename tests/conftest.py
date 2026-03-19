@@ -10,3 +10,10 @@ def fit_path():
     path = FIXTURES / "test.fit"
     assert path.exists(), f"Test fixture not found: {path}"
     return path
+
+
+@pytest.fixture
+def dev_fields_path():
+    path = FIXTURES / "with-developer-fields.fit"
+    assert path.exists(), f"Test fixture not found: {path}"
+    return path
