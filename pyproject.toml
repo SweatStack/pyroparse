@@ -10,7 +10,7 @@ dependencies = ["pyarrow>=14.0"]
 [project.optional-dependencies]
 server = ["starlette", "uvicorn[standard]", "python-multipart"]
 dev = ["pytest>=7.0", "maturin>=1.5"]
-scripts = ["polars", "duckdb", "sweatstack", "httpx"]
+scripts = ["polars", "duckdb", "sweatstack", "httpx", "matplotlib"]
 
 [build-system]
 requires = ["maturin>=1.5,<2.0"]
