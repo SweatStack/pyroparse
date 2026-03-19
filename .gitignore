@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv
+
+# Rust
+target/
+
+# Compiled extensions
+*.so
+*.pyd
+*.dylib
+
+# IDE
+.idea/
+.vscode/

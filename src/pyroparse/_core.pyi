@@ -1,0 +1,3 @@
+import pyarrow
+
+def parse_fit(path: str) -> pyarrow.RecordBatch: ...

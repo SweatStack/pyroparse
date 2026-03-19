@@ -1,0 +1,12 @@
+.venv
+.git
+target
+__pycache__
+*.py[oc]
+build
+dist
+wheels
+*.egg-info
+tests
+PLAN.md
+INTERFACE.md
