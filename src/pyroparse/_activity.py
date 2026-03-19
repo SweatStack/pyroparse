@@ -47,30 +47,58 @@ class Activity:
     # -- Eager loaders ---------------------------------------------------------
 
     @classmethod
-    def load_fit(cls, source: Source, *, metadata: dict | None = None) -> Activity:
+    def load_fit(
+        cls,
+        source: Source,
+        *,
+        columns: list[str] | None = None,
+        metadata: dict | None = None,
+    ) -> Activity:
         from pyroparse._fit import load_fit
 
         data, file_meta = load_fit(source, metadata=metadata)
+        if columns is not None:
+            data = data.select(columns)
         return cls(data, file_meta)
 
     @classmethod
-    def load_parquet(cls, source: Source, *, metadata: dict | None = None) -> Activity:
+    def load_parquet(
+        cls,
+        source: Source,
+        *,
+        columns: list[str] | None = None,
+        metadata: dict | None = None,
+    ) -> Activity:
         from pyroparse._parquet import read_parquet
 
-        data, file_meta = read_parquet(source)
+        data, file_meta = read_parquet(source, columns=columns)
         return cls(data, merge_metadata(file_meta, metadata))
 
     @classmethod
-    def load_csv(cls, source: Source, *, metadata: dict | None = None) -> Activity:
+    def load_csv(
+        cls,
+        source: Source,
+        *,
+        columns: list[str] | None = None,
+        metadata: dict | None = None,
+    ) -> Activity:
         from pyroparse._csv import read_csv
 
         data, inferred = read_csv(source)
+        if columns is not None:
+            data = data.select(columns)
         return cls(data, merge_metadata(inferred, metadata))
 
     # -- Lazy loaders ----------------------------------------------------------
 
     @classmethod
-    def open_fit(cls, path: PathSource, *, metadata: dict | None = None) -> Activity:
+    def open_fit(
+        cls,
+        path: PathSource,
+        *,
+        columns: list[str] | None = None,
+        metadata: dict | None = None,
+    ) -> Activity:
         """Load metadata now, defer record data until ``.data`` is accessed.
 
         Experimental: uses a custom binary FIT scanner that may not handle
@@ -84,12 +112,20 @@ class Activity:
 
         def loader() -> pa.Table:
             data, _ = load_fit(resolved)
+            if columns is not None:
+                return data.select(columns)
             return data
 
         return cls(None, file_meta, _loader=loader)
 
     @classmethod
-    def open_parquet(cls, path: PathSource, *, metadata: dict | None = None) -> Activity:
+    def open_parquet(
+        cls,
+        path: PathSource,
+        *,
+        columns: list[str] | None = None,
+        metadata: dict | None = None,
+    ) -> Activity:
         """Load schema metadata now, defer row data until ``.data`` is accessed."""
         from pyroparse._parquet import read_parquet, read_parquet_metadata
 
@@ -98,7 +134,7 @@ class Activity:
         merged = merge_metadata(file_meta, metadata)
 
         def loader() -> pa.Table:
-            data, _ = read_parquet(resolved)
+            data, _ = read_parquet(resolved, columns=columns)
             return data
 
         return cls(None, merged, _loader=loader)

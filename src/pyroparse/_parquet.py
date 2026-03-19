@@ -46,9 +46,11 @@ def write_parquet(
     )
 
 
-def read_parquet(source: Source) -> tuple[pa.Table, ActivityMetadata]:
+def read_parquet(
+    source: Source, *, columns: list[str] | None = None,
+) -> tuple[pa.Table, ActivityMetadata]:
     """Read a Parquet file and extract pyroparse metadata from the schema."""
-    table = pq.read_table(_resolve_source(source))
+    table = pq.read_table(_resolve_source(source), columns=columns)
     schema_meta = table.schema.metadata or {}
 
     if METADATA_KEY in schema_meta:

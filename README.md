@@ -124,6 +124,68 @@ WHERE key = 'pyroparse'
 
 ---
 
+## Batch operations
+
+Scan a directory of `.fit` files, filter by metadata, load only what you need:
+
+```python
+import pyroparse as pp
+
+# Scan — metadata only, no timeseries parsing (fast)
+catalog = pp.scan_fit("~/data/activities/")
+# file_path | sport | start_time | duration | distance | metrics | ...
+
+# Filter with PyArrow compute
+import pyarrow.compute as pc
+cycling = catalog.filter(pc.field("sport") == "cycling.road")
+
+# Load — only the files and columns you need
+paths = cycling.column("file_path").to_pylist()
+data = pp.load_fit_batch(paths, columns=["timestamp", "power", "heart_rate"])
+# file_path | timestamp | power | heart_rate
+```
+
+### Column selection
+
+All loaders accept a `columns` parameter to keep only the data you need. For Parquet files, this pushes down to the reader and skips column chunks entirely. For FIT and CSV, it reduces memory by dropping unwanted columns after parse.
+
+```python
+# Single file — only timestamp and power
+table = pp.read_fit("ride.fit", columns=["timestamp", "power"])
+
+# Parquet — true column pushdown, skips unused data on disk
+activity = pp.Activity.load_parquet("ride.parquet", columns=["timestamp", "speed"])
+```
+
+### Polars
+
+```python
+import polars as pl
+import pyroparse.polars as ppl
+
+ppl.scan_fit("~/data/")
+  .filter(pl.col("sport") == "cycling.road")
+  .fit.load_data(columns=["timestamp", "power"])
+  .select("file_path", "timestamp", "power")
+```
+
+### DuckDB
+
+```python
+import pyroparse.duckdb as ppdb
+
+catalog = ppdb.scan_fit("~/data/")
+catalog.filter("sport = 'cycling.road'").fetchdf()
+
+paths = catalog.filter("sport = 'cycling.road'").fetchnumpy()["file_path"].tolist()
+data = ppdb.load_fit(paths, columns=["timestamp", "power"])
+data.filter("power > 300").fetchdf()
+```
+
+> **Note:** `polars` and `duckdb` are optional dependencies — install them separately.
+
+---
+
 ## Multi-activity FIT files
 
 Triathlon and multisport files split cleanly by session:
