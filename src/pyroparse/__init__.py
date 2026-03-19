@@ -3,41 +3,36 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 
 import pyarrow as pa
 
-from pyroparse._core import parse_fit as _parse_fit
+from pyroparse._activity import Activity
+from pyroparse._errors import MultipleActivitiesError
+from pyroparse._metadata import ActivityMetadata, Device
+from pyroparse._session import Session
 
-__all__ = ["FitFile", "read_fit"]
-
-
-@dataclass(frozen=True, repr=False)
-class FitFile:
-    """A parsed FIT file.
-
-    Attributes:
-        data: Record messages as a PyArrow Table with columns:
-              timestamp, heart_rate, power, speed, cadence,
-              position_lat, position_long.
-    """
-
-    data: pa.Table
-
-    def __repr__(self) -> str:
-        return f"FitFile({self.data.num_rows:,} records, {self.data.num_columns} columns)"
+__all__ = [
+    "Activity",
+    "ActivityMetadata",
+    "Device",
+    "MultipleActivitiesError",
+    "Session",
+    "read_csv",
+    "read_fit",
+    "read_parquet",
+]
 
 
-def read_fit(source: str | os.PathLike[str]) -> FitFile:
-    """Read a FIT file.
+def read_fit(source: str | os.PathLike[str]) -> pa.Table:
+    """Read a FIT file and return the record data as a PyArrow Table."""
+    return Activity.load_fit(source).data
 
-    Args:
-        source: Path to a .fit file.
 
-    Returns:
-        A FitFile containing the parsed record data.
-    """
-    path = str(os.fspath(source))
-    batch = _parse_fit(path)
-    table = pa.Table.from_batches([batch])
-    return FitFile(data=table)
+def read_parquet(source: str | os.PathLike[str]) -> pa.Table:
+    """Read a Parquet file and return the data as a PyArrow Table."""
+    return Activity.load_parquet(source).data
+
+
+def read_csv(source: str | os.PathLike[str]) -> pa.Table:
+    """Read a CSV file and return the data as a PyArrow Table."""
+    return Activity.load_csv(source).data

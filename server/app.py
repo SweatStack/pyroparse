@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import csv
 import io
 import tempfile
 from pathlib import Path
 
+import pyarrow.csv as pcsv
 import pyarrow.parquet as pq
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, Response
 from starlette.routing import Route
 
-import pyroparse
+from pyroparse import Activity
 
 HTML_FORM = """<!doctype html>
 <html>
@@ -66,19 +66,15 @@ async def convert(request: Request) -> Response:
         tmp_path = Path(tmp.name)
 
     try:
-        fit = pyroparse.read_fit(tmp_path)
+        activity = Activity.load_fit(tmp_path)
     finally:
         tmp_path.unlink()
 
     stem = Path(upload.filename).stem if upload.filename else "output"
 
     if fmt == "csv":
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(fit.data.column_names)
-        for batch in fit.data.to_batches():
-            for row in zip(*[col.to_pylist() for col in batch.columns]):
-                writer.writerow(row)
+        buf = io.BytesIO()
+        pcsv.write_csv(activity.data, buf)
         return Response(
             content=buf.getvalue(),
             media_type="text/csv",
@@ -86,7 +82,7 @@ async def convert(request: Request) -> Response:
         )
 
     buf = io.BytesIO()
-    pq.write_table(fit.data, buf)
+    activity.to_parquet(buf)
     return Response(
         content=buf.getvalue(),
         media_type="application/octet-stream",

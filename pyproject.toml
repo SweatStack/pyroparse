@@ -1,7 +1,7 @@
 [project]
 name = "pyroparse"
 version = "0.1.0"
-description = "Blazing fast FIT file parsing. Forged in Rust. Fired up in Python."
+description = "Fast and opinionated activity data parsing. Forged in Rust. Fired up in Python."
 readme = "README.md"
 authors = [{ name = "Aart Goossens", email = "aart@sweatstack.no" }]
 requires-python = ">=3.10"
