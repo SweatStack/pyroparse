@@ -15,43 +15,11 @@ from starlette.routing import Route
 
 from pyroparse import Activity
 
-HTML_FORM = """<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pyroparse</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 4rem auto; padding: 0 1rem; color: #1a1a1a; }
-    h1 { font-size: 1.5rem; margin-bottom: .25rem; }
-    p { color: #666; margin-bottom: 2rem; font-size: .9rem; }
-    form { display: flex; flex-direction: column; gap: 1rem; }
-    label { font-size: .85rem; font-weight: 500; }
-    select, input[type=file] { padding: .5rem; border: 1px solid #ccc; border-radius: 4px; font-size: .9rem; }
-    button { padding: .6rem; background: #1a1a1a; color: #fff; border: none; border-radius: 4px; font-size: .9rem; cursor: pointer; }
-    button:hover { background: #333; }
-  </style>
-</head>
-<body>
-  <h1>Pyroparse</h1>
-  <p>Upload a FIT file, get Parquet or CSV back.</p>
-  <form action="/convert" method="post" enctype="multipart/form-data">
-    <label for="file">FIT file</label>
-    <input type="file" id="file" name="file" accept=".fit" required>
-    <label for="format">Output format</label>
-    <select id="format" name="format">
-      <option value="parquet">Parquet</option>
-      <option value="csv">CSV</option>
-    </select>
-    <button type="submit">Convert</button>
-  </form>
-</body>
-</html>"""
+_HTML = (Path(__file__).parent / "index.html").read_text()
 
 
 async def index(_request: Request) -> HTMLResponse:
-    return HTMLResponse(HTML_FORM)
+    return HTMLResponse(_HTML)
 
 
 async def convert(request: Request) -> Response:

@@ -1,0 +1,145 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pyroparse</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'JetBrains Mono', monospace; max-width: 640px; margin: 0 auto; padding: 0 1rem 3rem; color: #000; font-size: 14px; line-height: 1.5; }
+    a { color: #000; }
+    .banner { background: #e74c3c; color: rgba(255,255,255,.9); text-align: center; padding: .5rem 1.5rem; margin-top: 1.5rem; margin-bottom: 2rem; }
+    .banner a { color: #fff; text-decoration: underline; font-weight: bold; }
+    .card { border: 1px solid #ccc; padding: 1.5rem; margin-bottom: 2rem; }
+    h1 { font-size: 24px; font-weight: bold; margin-bottom: .5rem; text-align: center; }
+    h1 a { text-decoration: underline; }
+    .subtitle { text-align: center; margin-bottom: .75rem; }
+    form { display: flex; flex-direction: column; gap: .75rem; }
+    select, input[type=file] { font-family: 'JetBrains Mono', monospace; font-size: 14px; padding: .4rem; border: 1px solid #999; background: #fff; }
+    button[type=submit] { font-family: 'JetBrains Mono', monospace; font-size: 14px; padding: .5rem; background: #222; color: #fff; border: none; cursor: pointer; }
+    button[type=submit]:hover { background: #444; }
+    .legal { margin-top: 1.5rem; padding-top: .75rem; }
+    .examples { border: 1px solid #ccc; padding: 1.5rem; margin-bottom: 2rem; }
+    .tabs { display: flex; gap: 0; margin-bottom: .75rem; }
+    .tab { font-family: 'JetBrains Mono', monospace; font-size: 14px; padding: .3rem .7rem; border: 1px solid #ddd; background: #f5f5f5; cursor: pointer; margin-right: -1px; }
+    .tab.active { background: #fff; font-weight: bold; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    .pre-wrap { position: relative; }
+    pre { background: #f9f9f9; border: 1px solid #ddd; padding: .75rem; padding-top: 2rem; overflow-x: auto; font-size: 14px; white-space: pre; margin: 0; }
+    .copy-btn { position: absolute; top: .4rem; right: .4rem; font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: .2rem .5rem; background: #eee; border: 1px solid #ccc; cursor: pointer; }
+    .copy-btn:hover { background: #ddd; }
+  </style>
+</head>
+<body>
+  <div class="banner">
+    Free service provided by <a href="https://sweatstack.no">SweatStack</a>, the sports data platform for developers.
+  </div>
+
+  <div class="card">
+    <h1><a href="https://github.com/sweatstack/pyroparse">pyroparse</a></h1>
+    <p class="subtitle">Fast and opinionated activity data parsing.</p>
+    <p class="subtitle">Forged in Rust. Fired up in Python.</p>
+    <p class="subtitle">Upload a .fit file, get a parquet or csv file back.</p>
+    <br><hr><br>
+    <form action="/convert" method="post" enctype="multipart/form-data">
+      <label for="file">.fit file</label>
+      <input type="file" id="file" name="file" accept=".fit" required>
+      <label for="format">output format</label>
+      <select id="format" name="format">
+        <option value="parquet">parquet</option>
+        <option value="csv">csv</option>
+      </select>
+      <button type="submit">convert</button>
+    </form>
+    <br><hr>
+    <div class="legal">
+      <strong>Privacy:</strong> No uploaded data is stored, logged, or retained.
+      Files are held in memory only for the duration of the conversion and
+      discarded immediately after the response is sent. No personal data is
+      collected. This service is provided as-is, without warranties or guarantees of any kind.
+    </div>
+  </div>
+
+  <div class="examples">
+    <div class="tabs">
+      <div class="tab active" data-tab="curl">cURL</div>
+      <div class="tab" data-tab="python">Python</div>
+      <div class="tab" data-tab="r">R</div>
+    </div>
+    <div class="tab-content active" data-tab="curl"><div class="pre-wrap"><button class="copy-btn" data-target="ex-curl">copy</button><pre id="ex-curl"></pre></div></div>
+    <div class="tab-content" data-tab="python"><div class="pre-wrap"><button class="copy-btn" data-target="ex-python">copy</button><pre id="ex-python"></pre></div></div>
+    <div class="tab-content" data-tab="r"><div class="pre-wrap"><button class="copy-btn" data-target="ex-r">copy</button><pre id="ex-r"></pre></div></div>
+  </div>
+
+  <script>
+    var base = window.location.origin;
+    var formatEl = document.getElementById("format");
+
+    function updateExamples() {
+      var fmt = formatEl.value;
+      var ext = fmt === "csv" ? "csv" : "parquet";
+
+      document.getElementById("ex-curl").textContent = [
+        "curl \\",
+        "  -F file=@activity.fit \\",
+        "  -F format=" + fmt + " \\",
+        "  -o activity." + ext + " \\",
+        "  " + base + "/convert"
+      ].join("\n");
+
+      document.getElementById("ex-python").textContent = [
+        "import httpx",
+        "",
+        'with open("activity.fit", "rb") as f:',
+        "    resp = httpx.post(",
+        '        "' + base + '/convert",',
+        '        files={"file": ("activity.fit", f, "application/octet-stream")},',
+        '        data={"format": "' + fmt + '"},',
+        "    )",
+        "",
+        'with open("activity.' + ext + '", "wb") as f:',
+        "    f.write(resp.content)"
+      ].join("\n");
+
+      document.getElementById("ex-r").textContent = [
+        "library(httr2)",
+        "",
+        'resp <- request("' + base + '/convert") |>',
+        "  req_body_multipart(",
+        '    file = curl::form_file("activity.fit"),',
+        '    format = "' + fmt + '"',
+        "  ) |>",
+        "  req_perform()",
+        "",
+        'writeBin(resp_body_raw(resp), "activity.' + ext + '")'
+      ].join("\n");
+    }
+
+    formatEl.addEventListener("change", updateExamples);
+    updateExamples();
+
+    document.querySelectorAll(".copy-btn").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        var pre = document.getElementById(btn.dataset.target);
+        navigator.clipboard.writeText(pre.textContent).then(function() {
+          btn.textContent = "copied";
+          setTimeout(function() { btn.textContent = "copy"; }, 1500);
+        });
+      });
+    });
+
+    document.querySelectorAll(".tab").forEach(function(tab) {
+      tab.addEventListener("click", function() {
+        document.querySelectorAll(".tab").forEach(function(t) { t.classList.remove("active"); });
+        document.querySelectorAll(".tab-content").forEach(function(c) { c.classList.remove("active"); });
+        tab.classList.add("active");
+        document.querySelector('.tab-content[data-tab="' + tab.dataset.tab + '"]').classList.add("active");
+      });
+    });
+  </script>
+</body>
+</html>
