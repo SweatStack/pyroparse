@@ -20,7 +20,7 @@ FROM python:3.12-alpine
 
 WORKDIR /app
 COPY --from=builder /wheels /wheels
-COPY server/app.py .
+COPY server/ .
 
 RUN pip install --no-cache-dir /wheels/*.whl starlette uvicorn python-multipart && \
     rm -rf /wheels
