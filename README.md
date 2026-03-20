@@ -41,6 +41,18 @@ activity.metadata.devices       # [Device(manufacturer="garmin", product="edge_5
 activity.data                   # pyarrow.Table — 21,666 rows × 7 typed columns
 ```
 
+### Lazy loading
+
+`open_fit()` and `open_parquet()` read metadata immediately but defer data loading until you access `.data`. Useful when you need to inspect metadata before deciding whether to load the full timeseries.
+
+```python
+activity = pp.Activity.open_fit("ride.fit")
+activity.metadata.sport     # "cycling" — available immediately
+activity.metadata.duration  # 3842.7   — no data parsed yet
+
+activity.data               # pyarrow.Table — parsed on first access
+```
+
 ### FIT to Parquet
 
 ```python
