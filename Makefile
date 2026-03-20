@@ -1,6 +1,6 @@
 unexport CONDA_PREFIX
 
-.PHONY: test build benchmark server build_server
+.PHONY: test build benchmark benchmark_http server build_server
 
 test:
 	uv run python -m pytest tests/ -v $(pytestargs)
@@ -10,6 +10,15 @@ build:
 
 benchmark:
 	uv run python scripts/benchmark.py
+
+benchmark_http:
+	@echo "Starting server..."
+	@uv run --extra server uvicorn server.app:app --host 127.0.0.1 --port 8000 & \
+	SERVER_PID=$$!; \
+	trap "kill $$SERVER_PID 2>/dev/null" EXIT; \
+	sleep 2; \
+	uv run --extra scripts --extra server python scripts/benchmark_http.py $(if $(remote),--remote $(remote)); \
+	kill $$SERVER_PID 2>/dev/null
 
 server:
 	uv run --extra server uvicorn server.app:app --reload
