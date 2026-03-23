@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::sync::Arc;
 
@@ -43,6 +43,35 @@ fn value_to_i8(val: &Value) -> Option<i8> {
         Value::SInt16(v) => i8::try_from(*v).ok(),
         Value::Float32(v) => Some(*v as i8),
         Value::Float64(v) => Some(*v as i8),
+        _ => None,
+    }
+}
+
+fn value_to_i32(val: &Value) -> Option<i32> {
+    match val {
+        Value::SInt8(v) => Some(*v as i32),
+        Value::UInt8(v) => Some(*v as i32),
+        Value::SInt16(v) => Some(*v as i32),
+        Value::UInt16(v) => Some(*v as i32),
+        Value::SInt32(v) => Some(*v),
+        Value::Float32(v) => Some(*v as i32),
+        Value::Float64(v) => Some(*v as i32),
+        _ => None,
+    }
+}
+
+fn value_to_i64(val: &Value) -> Option<i64> {
+    match val {
+        Value::SInt8(v) => Some(*v as i64),
+        Value::UInt8(v) => Some(*v as i64),
+        Value::SInt16(v) => Some(*v as i64),
+        Value::UInt16(v) => Some(*v as i64),
+        Value::SInt32(v) => Some(*v as i64),
+        Value::UInt32(v) => Some(*v as i64),
+        Value::SInt64(v) => Some(*v),
+        Value::UInt64(v) => Some(*v as i64),
+        Value::Float32(v) => Some(*v as i64),
+        Value::Float64(v) => Some(*v as i64),
         _ => None,
     }
 }
@@ -110,109 +139,73 @@ fn value_to_u8(val: &Value) -> Option<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Dynamic value type — for FIT fields outside the fixed schema
+// Column-oriented storage for extra (non-fixed) FIT fields
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
-enum DynValue {
-    I8(i8),
-    I16(i16),
-    I32(i32),
-    I64(i64),
-    F32(f32),
-    F64(f64),
-    Str(String),
+/// A single extra column stored as a typed vector, one entry per row.
+/// Pre-allocated to n_rows with None, then filled during the second pass.
+enum TypedColumn {
+    I8(Vec<Option<i8>>),
+    I16(Vec<Option<i16>>),
+    I32(Vec<Option<i32>>),
+    I64(Vec<Option<i64>>),
+    F32(Vec<Option<f32>>),
+    F64(Vec<Option<f64>>),
+    Str(Vec<Option<String>>),
 }
 
-impl DynValue {
-    fn arrow_type(&self) -> DataType {
-        match self {
-            Self::I8(_) => DataType::Int8,
-            Self::I16(_) => DataType::Int16,
-            Self::I32(_) => DataType::Int32,
-            Self::I64(_) => DataType::Int64,
-            Self::F32(_) => DataType::Float32,
-            Self::F64(_) => DataType::Float64,
-            Self::Str(_) => DataType::Utf8,
+impl TypedColumn {
+    fn new(dtype: &DataType, n_rows: usize) -> Self {
+        match dtype {
+            DataType::Int8 => Self::I8(vec![None; n_rows]),
+            DataType::Int16 => Self::I16(vec![None; n_rows]),
+            DataType::Int32 => Self::I32(vec![None; n_rows]),
+            DataType::Int64 => Self::I64(vec![None; n_rows]),
+            DataType::Float32 => Self::F32(vec![None; n_rows]),
+            DataType::Float64 => Self::F64(vec![None; n_rows]),
+            DataType::Utf8 => Self::Str(vec![None; n_rows]),
+            _ => unreachable!("unsupported extra column type: {dtype:?}"),
         }
     }
 
-    fn as_i8(&self) -> Option<i8> {
+    fn set(&mut self, idx: usize, val: &Value) {
         match self {
-            Self::I8(v) => Some(*v),
-            _ => None,
+            Self::I8(v) => v[idx] = value_to_i8(val),
+            Self::I16(v) => v[idx] = value_to_i16(val),
+            Self::I32(v) => v[idx] = value_to_i32(val),
+            Self::I64(v) => v[idx] = value_to_i64(val),
+            Self::F32(v) => v[idx] = value_to_f32(val),
+            Self::F64(v) => v[idx] = value_to_f64(val),
+            Self::Str(v) => v[idx] = value_to_string(val),
         }
     }
 
-    fn as_i16(&self) -> Option<i16> {
+    fn to_arrow_array(&self) -> Arc<dyn arrow::array::Array> {
         match self {
-            Self::I8(v) => Some(*v as i16),
-            Self::I16(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    fn as_i32(&self) -> Option<i32> {
-        match self {
-            Self::I8(v) => Some(*v as i32),
-            Self::I16(v) => Some(*v as i32),
-            Self::I32(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    fn as_i64(&self) -> Option<i64> {
-        match self {
-            Self::I8(v) => Some(*v as i64),
-            Self::I16(v) => Some(*v as i64),
-            Self::I32(v) => Some(*v as i64),
-            Self::I64(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    fn as_f32(&self) -> Option<f32> {
-        match self {
-            Self::I8(v) => Some(*v as f32),
-            Self::I16(v) => Some(*v as f32),
-            Self::F32(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    fn as_f64(&self) -> Option<f64> {
-        match self {
-            Self::I8(v) => Some(*v as f64),
-            Self::I16(v) => Some(*v as f64),
-            Self::I32(v) => Some(*v as f64),
-            Self::I64(v) => Some(*v as f64),
-            Self::F32(v) => Some(*v as f64),
-            Self::F64(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    fn as_str(&self) -> Option<&str> {
-        match self {
-            Self::Str(s) => Some(s),
-            _ => None,
+            Self::I8(v) => Arc::new(Int8Array::from_iter(v.iter().copied())),
+            Self::I16(v) => Arc::new(Int16Array::from_iter(v.iter().copied())),
+            Self::I32(v) => Arc::new(Int32Array::from_iter(v.iter().copied())),
+            Self::I64(v) => Arc::new(Int64Array::from_iter(v.iter().copied())),
+            Self::F32(v) => Arc::new(Float32Array::from_iter(v.iter().copied())),
+            Self::F64(v) => Arc::new(Float64Array::from_iter(v.iter().copied())),
+            Self::Str(v) => {
+                let arr: StringArray = v.iter().map(|s| s.as_deref()).collect();
+                Arc::new(arr)
+            }
         }
     }
 }
 
-fn to_dyn_value(val: &Value) -> Option<DynValue> {
+/// Map a FIT Value to its Arrow DataType without allocating.
+fn fit_value_to_arrow_type(val: &Value) -> Option<DataType> {
     match val {
-        Value::SInt8(v) => Some(DynValue::I8(*v)),
-        Value::UInt8(v) => Some(DynValue::I16(*v as i16)),
-        Value::SInt16(v) => Some(DynValue::I16(*v)),
-        Value::UInt16(v) => Some(DynValue::I32(*v as i32)),
-        Value::SInt32(v) => Some(DynValue::I32(*v)),
-        Value::UInt32(v) => Some(DynValue::I64(*v as i64)),
-        Value::SInt64(v) => Some(DynValue::I64(*v)),
-        Value::UInt64(v) => Some(DynValue::I64(*v as i64)),
-        Value::Float32(v) => Some(DynValue::F32(*v)),
-        Value::Float64(v) => Some(DynValue::F64(*v)),
-        Value::String(s) => Some(DynValue::Str(s.clone())),
+        Value::SInt8(_) => Some(DataType::Int8),
+        Value::UInt8(_) | Value::SInt16(_) => Some(DataType::Int16),
+        Value::UInt16(_) | Value::SInt32(_) => Some(DataType::Int32),
+        Value::UInt32(_) | Value::SInt64(_) | Value::UInt64(_) => Some(DataType::Int64),
+        Value::Float32(_) => Some(DataType::Float32),
+        Value::Float64(_) => Some(DataType::Float64),
+        Value::String(_) => Some(DataType::Utf8),
         _ => None,
     }
 }
@@ -241,7 +234,7 @@ fn normalize_field_name(name: &str) -> String {
     result
 }
 
-/// The 12 fixed columns — these are never added to `extra`.
+/// The 12 fixed columns — these are never added to extras.
 fn is_fixed_column(name: &str) -> bool {
     matches!(
         name,
@@ -257,6 +250,33 @@ fn is_fixed_column(name: &str) -> bool {
             | "distance"
             | "core_temperature"
             | "smo2"
+    )
+}
+
+/// Fast check for raw FIT field names handled by dedicated match arms.
+/// Must stay in sync with the Record match arms in `process_messages`.
+fn is_handled_field(name: &str) -> bool {
+    matches!(
+        name,
+        "timestamp"
+            | "heart_rate"
+            | "power"
+            | "cadence"
+            | "speed"
+            | "enhanced_speed"
+            | "position_lat"
+            | "position_long"
+            | "altitude"
+            | "enhanced_altitude"
+            | "temperature"
+            | "distance"
+            | "Power"
+            | "Core Body Temperature"
+            | "core_temperature"
+            | "Current Saturated Hemoglobin Percent"
+            | "SmO2"
+            | "smo2"
+            | "saturated_hemoglobin_percent"
     )
 }
 
@@ -394,8 +414,6 @@ struct RecordRow {
     distance: Option<f64>,
     core_temperature: Option<f32>,
     smo2: Option<f32>,
-    /// All other fields not in the fixed schema.
-    extra: BTreeMap<String, DynValue>,
 }
 
 #[derive(Default)]
@@ -421,6 +439,8 @@ struct DeviceMeta {
 
 struct ParseResult {
     records: Vec<RecordRow>,
+    extra_col_info: Vec<(String, DataType)>,
+    extra_data: Vec<TypedColumn>,
     sessions: Vec<SessionMeta>,
     devices: Vec<DeviceMeta>,
     developer_sensors: Vec<DeveloperSensor>,
@@ -431,59 +451,44 @@ struct ParseResult {
 // ---------------------------------------------------------------------------
 
 fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
-    let mut records = Vec::new();
     let mut sessions = Vec::new();
     let mut devices = Vec::new();
     let mut dev_field_groups: BTreeMap<u8, Vec<String>> = BTreeMap::new();
 
+    // ── Pass 1: process metadata messages + discover extra columns ────────
+    let mut n_rows = 0usize;
+    let mut extra_types: BTreeMap<String, DataType> = BTreeMap::new();
+    // Cache: raw FIT field name → Some(normalized) or None if it maps to a
+    // fixed column. Populated once per unique name, avoids repeat allocations.
+    let mut raw_to_normalized: HashMap<String, Option<String>> = HashMap::new();
+
     for msg in messages {
         match msg.kind() {
             MesgNum::Record => {
-                let mut row = RecordRow::default();
+                n_rows += 1;
                 for field in msg.fields() {
-                    match field.name() {
-                        // === Normalized columns (stable schema) ===
-                        "timestamp" => row.timestamp = value_to_timestamp_us(field.value()),
-                        "heart_rate" => row.heart_rate = value_to_i16(field.value()),
-                        "power" => row.power = value_to_i16(field.value()),
-                        "speed" | "enhanced_speed" => row.speed = value_to_f32(field.value()),
-                        "cadence" => row.cadence = value_to_i16(field.value()),
-                        "position_lat" => {
-                            row.position_lat =
-                                value_to_f64(field.value()).map(|v| v * SEMICIRCLE_TO_DEGREES)
-                        }
-                        "position_long" => {
-                            row.position_long =
-                                value_to_f64(field.value()).map(|v| v * SEMICIRCLE_TO_DEGREES)
-                        }
-                        "altitude" | "enhanced_altitude" => {
-                            row.altitude = value_to_f32(field.value())
-                        }
-                        "temperature" => row.temperature = value_to_i8(field.value()),
-                        "distance" => row.distance = value_to_f64(field.value()),
-                        // === Developer fields → fixed columns ===
-                        "Power" if row.power.is_none() => {
-                            row.power = value_to_i16(field.value())
-                        }
-                        "Core Body Temperature" | "core_temperature" => {
-                            row.core_temperature = value_to_f32(field.value())
-                        }
-                        "Current Saturated Hemoglobin Percent" | "SmO2" | "smo2"
-                        | "saturated_hemoglobin_percent" => {
-                            row.smo2 = value_to_f32(field.value())
-                        }
-                        // === Everything else → extra columns ===
-                        other => {
-                            let name = normalize_field_name(other);
-                            if !is_fixed_column(&name) {
-                                if let Some(val) = to_dyn_value(field.value()) {
-                                    row.extra.entry(name).or_insert(val);
-                                }
+                    let raw = field.name();
+                    if is_handled_field(raw) {
+                        continue;
+                    }
+                    // Normalize once per unique raw name.
+                    if !raw_to_normalized.contains_key(raw) {
+                        let n = normalize_field_name(raw);
+                        let val = if is_fixed_column(&n) { None } else { Some(n) };
+                        raw_to_normalized.insert(raw.to_string(), val);
+                    }
+                    let Some(normalized) = raw_to_normalized.get(raw).unwrap().as_ref() else {
+                        continue;
+                    };
+                    if let Some(dtype) = fit_value_to_arrow_type(field.value()) {
+                        match extra_types.get_mut(normalized.as_str()) {
+                            Some(existing) => *existing = promote_type(existing, &dtype),
+                            None => {
+                                extra_types.insert(normalized.clone(), dtype);
                             }
                         }
                     }
                 }
-                records.push(row);
             }
             MesgNum::Session => {
                 let mut session = SessionMeta::default();
@@ -553,14 +558,85 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
         }
     }
 
-    let present_extra_columns: BTreeSet<String> = records
+    // Build extra column info and raw-name → column-index lookup for pass 2.
+    let extra_col_info: Vec<(String, DataType)> = extra_types.into_iter().collect();
+    let norm_to_col: HashMap<&str, usize> = extra_col_info
         .iter()
-        .flat_map(|r| r.extra.keys().cloned())
+        .enumerate()
+        .map(|(i, (name, _))| (name.as_str(), i))
         .collect();
+    let raw_to_col: HashMap<String, usize> = raw_to_normalized
+        .into_iter()
+        .filter_map(|(raw, opt_norm)| {
+            let norm = opt_norm?;
+            let &idx = norm_to_col.get(norm.as_str())?;
+            Some((raw, idx))
+        })
+        .collect();
+    let mut extra_data: Vec<TypedColumn> = extra_col_info
+        .iter()
+        .map(|(_, dtype)| TypedColumn::new(dtype, n_rows))
+        .collect();
+
+    // Classify developer sensors.
+    let present_extra_columns: BTreeSet<String> =
+        extra_col_info.iter().map(|(name, _)| name.clone()).collect();
     let developer_sensors = classify_developer_sensors(&dev_field_groups, &present_extra_columns);
+
+    // ── Pass 2: fill record data ──────────────────────────────────────────
+    let mut records = Vec::with_capacity(n_rows);
+    let mut row_idx = 0usize;
+
+    for msg in messages {
+        if msg.kind() != MesgNum::Record {
+            continue;
+        }
+        let mut row = RecordRow::default();
+        for field in msg.fields() {
+            match field.name() {
+                "timestamp" => row.timestamp = value_to_timestamp_us(field.value()),
+                "heart_rate" => row.heart_rate = value_to_i16(field.value()),
+                "power" => row.power = value_to_i16(field.value()),
+                "speed" | "enhanced_speed" => row.speed = value_to_f32(field.value()),
+                "cadence" => row.cadence = value_to_i16(field.value()),
+                "position_lat" => {
+                    row.position_lat =
+                        value_to_f64(field.value()).map(|v| v * SEMICIRCLE_TO_DEGREES)
+                }
+                "position_long" => {
+                    row.position_long =
+                        value_to_f64(field.value()).map(|v| v * SEMICIRCLE_TO_DEGREES)
+                }
+                "altitude" | "enhanced_altitude" => {
+                    row.altitude = value_to_f32(field.value())
+                }
+                "temperature" => row.temperature = value_to_i8(field.value()),
+                "distance" => row.distance = value_to_f64(field.value()),
+                "Power" if row.power.is_none() => {
+                    row.power = value_to_i16(field.value())
+                }
+                "Core Body Temperature" | "core_temperature" => {
+                    row.core_temperature = value_to_f32(field.value())
+                }
+                "Current Saturated Hemoglobin Percent" | "SmO2" | "smo2"
+                | "saturated_hemoglobin_percent" => {
+                    row.smo2 = value_to_f32(field.value())
+                }
+                other => {
+                    if let Some(&ci) = raw_to_col.get(other) {
+                        extra_data[ci].set(row_idx, field.value());
+                    }
+                }
+            }
+        }
+        records.push(row);
+        row_idx += 1;
+    }
 
     ParseResult {
         records,
+        extra_col_info,
+        extra_data,
         sessions,
         devices,
         developer_sensors,
@@ -587,83 +663,25 @@ fn promote_type(a: &DataType, b: &DataType) -> DataType {
         return a.clone();
     }
     match (a, b) {
-        // Integer widening
         (DataType::Int8, DataType::Int16) | (DataType::Int16, DataType::Int8) => DataType::Int16,
         (DataType::Int8 | DataType::Int16, DataType::Int32)
         | (DataType::Int32, DataType::Int8 | DataType::Int16) => DataType::Int32,
         (DataType::Int8 | DataType::Int16 | DataType::Int32, DataType::Int64)
         | (DataType::Int64, DataType::Int8 | DataType::Int16 | DataType::Int32) => DataType::Int64,
-        // Float widening
         (DataType::Float32, DataType::Float64) | (DataType::Float64, DataType::Float32) => {
             DataType::Float64
         }
-        // Integer + Float → Float64
         (DataType::Utf8, _) | (_, DataType::Utf8) => DataType::Utf8,
         _ => DataType::Float64,
     }
 }
 
-/// Discover the extra columns present across all rows, with their Arrow types.
-/// Returns (name, type) pairs sorted alphabetically by name.
-fn discover_extra_columns(rows: &[RecordRow]) -> Vec<(String, DataType)> {
-    let mut columns: BTreeMap<String, DataType> = BTreeMap::new();
-    for row in rows {
-        for (name, val) in &row.extra {
-            let new_type = val.arrow_type();
-            columns
-                .entry(name.clone())
-                .and_modify(|existing| *existing = promote_type(existing, &new_type))
-                .or_insert(new_type);
-        }
-    }
-    columns.into_iter().collect()
-}
-
-/// Build an Arrow array for a single extra column across all rows.
-fn build_extra_array(
-    rows: &[RecordRow],
-    name: &str,
-    dtype: &DataType,
-) -> Arc<dyn arrow::array::Array> {
-    match dtype {
-        DataType::Int8 => Arc::new(Int8Array::from_iter(
-            rows.iter().map(|r| r.extra.get(name).and_then(|v| v.as_i8())),
-        )),
-        DataType::Int16 => Arc::new(Int16Array::from_iter(
-            rows.iter()
-                .map(|r| r.extra.get(name).and_then(|v| v.as_i16())),
-        )),
-        DataType::Int32 => Arc::new(Int32Array::from_iter(
-            rows.iter()
-                .map(|r| r.extra.get(name).and_then(|v| v.as_i32())),
-        )),
-        DataType::Int64 => Arc::new(Int64Array::from_iter(
-            rows.iter()
-                .map(|r| r.extra.get(name).and_then(|v| v.as_i64())),
-        )),
-        DataType::Float32 => Arc::new(Float32Array::from_iter(
-            rows.iter()
-                .map(|r| r.extra.get(name).and_then(|v| v.as_f32())),
-        )),
-        DataType::Float64 => Arc::new(Float64Array::from_iter(
-            rows.iter()
-                .map(|r| r.extra.get(name).and_then(|v| v.as_f64())),
-        )),
-        DataType::Utf8 => {
-            let arr: StringArray = rows
-                .iter()
-                .map(|r| r.extra.get(name).and_then(|v| v.as_str()))
-                .collect();
-            Arc::new(arr)
-        }
-        _ => unreachable!("unexpected extra column type"),
-    }
-}
-
-fn rows_to_batch(rows: &[RecordRow]) -> PyResult<RecordBatch> {
-    let extra_cols = discover_extra_columns(rows);
-
-    // Build schema: fixed columns first, then extras alphabetically.
+fn build_batch(
+    records: &[RecordRow],
+    extra_col_info: &[(String, DataType)],
+    extra_data: &[TypedColumn],
+) -> PyResult<RecordBatch> {
+    // Schema: 12 fixed columns, then extras alphabetically.
     let mut fields = vec![
         Field::new(
             "timestamp",
@@ -682,33 +700,40 @@ fn rows_to_batch(rows: &[RecordRow]) -> PyResult<RecordBatch> {
         Field::new("core_temperature", DataType::Float32, true),
         Field::new("smo2", DataType::Float32, true),
     ];
-    for (name, dtype) in &extra_cols {
+    for (name, dtype) in extra_col_info {
         fields.push(Field::new(name, dtype.clone(), true));
     }
     let schema = Schema::new(fields);
 
-    // Build arrays: fixed columns first.
     let mut arrays: Vec<Arc<dyn arrow::array::Array>> = vec![
         Arc::new(
             TimestampMicrosecondArray::from(
-                rows.iter().map(|r| r.timestamp).collect::<Vec<_>>(),
+                records.iter().map(|r| r.timestamp).collect::<Vec<_>>(),
             )
             .with_timezone("UTC"),
         ),
-        Arc::new(Int16Array::from_iter(rows.iter().map(|r| r.heart_rate))),
-        Arc::new(Int16Array::from_iter(rows.iter().map(|r| r.power))),
-        Arc::new(Int16Array::from_iter(rows.iter().map(|r| r.cadence))),
-        Arc::new(Float32Array::from_iter(rows.iter().map(|r| r.speed))),
-        Arc::new(Float64Array::from_iter(rows.iter().map(|r| r.position_lat))),
-        Arc::new(Float64Array::from_iter(rows.iter().map(|r| r.position_long))),
-        Arc::new(Float32Array::from_iter(rows.iter().map(|r| r.altitude))),
-        Arc::new(Int8Array::from_iter(rows.iter().map(|r| r.temperature))),
-        Arc::new(Float64Array::from_iter(rows.iter().map(|r| r.distance))),
-        Arc::new(Float32Array::from_iter(rows.iter().map(|r| r.core_temperature))),
-        Arc::new(Float32Array::from_iter(rows.iter().map(|r| r.smo2))),
+        Arc::new(Int16Array::from_iter(records.iter().map(|r| r.heart_rate))),
+        Arc::new(Int16Array::from_iter(records.iter().map(|r| r.power))),
+        Arc::new(Int16Array::from_iter(records.iter().map(|r| r.cadence))),
+        Arc::new(Float32Array::from_iter(records.iter().map(|r| r.speed))),
+        Arc::new(Float64Array::from_iter(
+            records.iter().map(|r| r.position_lat),
+        )),
+        Arc::new(Float64Array::from_iter(
+            records.iter().map(|r| r.position_long),
+        )),
+        Arc::new(Float32Array::from_iter(records.iter().map(|r| r.altitude))),
+        Arc::new(Int8Array::from_iter(
+            records.iter().map(|r| r.temperature),
+        )),
+        Arc::new(Float64Array::from_iter(records.iter().map(|r| r.distance))),
+        Arc::new(Float32Array::from_iter(
+            records.iter().map(|r| r.core_temperature),
+        )),
+        Arc::new(Float32Array::from_iter(records.iter().map(|r| r.smo2))),
     ];
-    for (name, dtype) in &extra_cols {
-        arrays.push(build_extra_array(rows, name, dtype));
+    for col in extra_data {
+        arrays.push(col.to_arrow_array());
     }
 
     RecordBatch::try_new(Arc::new(schema), arrays)
@@ -719,25 +744,34 @@ fn rows_to_batch(rows: &[RecordRow]) -> PyResult<RecordBatch> {
 // Metrics detection — which data columns have non-null values
 // ---------------------------------------------------------------------------
 
-fn detect_metrics(rows: &[RecordRow]) -> Vec<String> {
-    let mut metrics = Vec::new();
-    if rows.iter().any(|r| r.heart_rate.is_some()) { metrics.push("heart_rate".into()); }
-    if rows.iter().any(|r| r.power.is_some()) { metrics.push("power".into()); }
-    if rows.iter().any(|r| r.speed.is_some()) { metrics.push("speed".into()); }
-    if rows.iter().any(|r| r.cadence.is_some()) { metrics.push("cadence".into()); }
-    if rows.iter().any(|r| r.position_lat.is_some()) { metrics.push("gps".into()); }
-    if rows.iter().any(|r| r.altitude.is_some()) { metrics.push("altitude".into()); }
-    if rows.iter().any(|r| r.temperature.is_some()) { metrics.push("temperature".into()); }
-    if rows.iter().any(|r| r.distance.is_some()) { metrics.push("distance".into()); }
-    if rows.iter().any(|r| r.core_temperature.is_some()) { metrics.push("core_temperature".into()); }
-    if rows.iter().any(|r| r.smo2.is_some()) { metrics.push("smo2".into()); }
-
-    // Extra columns — any that appear have at least one non-null value.
-    let mut extra_names: BTreeSet<String> = BTreeSet::new();
-    for row in rows {
-        extra_names.extend(row.extra.keys().cloned());
+fn detect_metrics(batch: &RecordBatch) -> Vec<String> {
+    let n = batch.num_rows();
+    if n == 0 {
+        return Vec::new();
     }
-    metrics.extend(extra_names);
+    let mut metrics = Vec::new();
+    let has_data = |i: usize| batch.column(i).null_count() < n;
+
+    // Fixed columns: 0=timestamp 1=hr 2=power 3=cadence 4=speed
+    //   5=lat 6=long 7=alt 8=temp 9=dist 10=core_temp 11=smo2
+    if has_data(1) { metrics.push("heart_rate".into()); }
+    if has_data(2) { metrics.push("power".into()); }
+    if has_data(4) { metrics.push("speed".into()); }
+    if has_data(3) { metrics.push("cadence".into()); }
+    if has_data(5) && has_data(6) { metrics.push("gps".into()); }
+    if has_data(7) { metrics.push("altitude".into()); }
+    if has_data(8) { metrics.push("temperature".into()); }
+    if has_data(9) { metrics.push("distance".into()); }
+    if has_data(10) { metrics.push("core_temperature".into()); }
+    if has_data(11) { metrics.push("smo2".into()); }
+
+    // Extra columns (indices 12+).
+    let schema = batch.schema();
+    for i in 12..batch.num_columns() {
+        if has_data(i) {
+            metrics.push(schema.field(i).name().clone());
+        }
+    }
 
     metrics
 }
@@ -791,16 +825,18 @@ fn sensor_to_dict<'py>(
 
 fn build_activity_dict<'py>(
     py: Python<'py>,
-    rows: &[RecordRow],
+    batch: &RecordBatch,
     session: Option<&SessionMeta>,
     devices: &[DeviceMeta],
     developer_sensors: &[DeveloperSensor],
 ) -> PyResult<Bound<'py, PyDict>> {
-    let batch = rows_to_batch(rows)?;
-    let metrics = detect_metrics(rows);
+    let metrics = detect_metrics(batch);
 
     let activity = PyDict::new_bound(py);
-    activity.set_item("records", pyo3_arrow::PyRecordBatch::new(batch).to_pyarrow(py)?)?;
+    activity.set_item(
+        "records",
+        pyo3_arrow::PyRecordBatch::new(batch.clone()).to_pyarrow(py)?,
+    )?;
 
     let meta = match session {
         Some(s) => session_to_dict(py, s)?,
@@ -842,11 +878,13 @@ fn build_parse_result_dict(py: Python<'_>, parsed: ParseResult) -> PyResult<PyOb
     let result = PyDict::new_bound(py);
     let activities = PyList::empty_bound(py);
 
+    let batch = build_batch(&parsed.records, &parsed.extra_col_info, &parsed.extra_data)?;
+
     if parsed.sessions.len() <= 1 {
         let session = parsed.sessions.first();
         activities.append(build_activity_dict(
             py,
-            &parsed.records,
+            &batch,
             session,
             &parsed.devices,
             &parsed.developer_sensors,
@@ -855,18 +893,21 @@ fn build_parse_result_dict(py: Python<'_>, parsed: ParseResult) -> PyResult<PyOb
         for session in &parsed.sessions {
             let start = session.start_timestamp_us.unwrap_or(i64::MIN);
             let end = session.end_timestamp_us.unwrap_or(i64::MAX);
-            let rows: Vec<RecordRow> = parsed
+            let first = parsed
                 .records
                 .iter()
-                .filter(|r| {
-                    let ts = r.timestamp.unwrap_or(0);
-                    ts >= start && ts <= end
-                })
-                .cloned()
-                .collect();
+                .position(|r| r.timestamp.unwrap_or(0) >= start)
+                .unwrap_or(parsed.records.len());
+            let last = parsed
+                .records
+                .iter()
+                .rposition(|r| r.timestamp.unwrap_or(0) <= end)
+                .map(|i| i + 1)
+                .unwrap_or(first);
+            let sliced = batch.slice(first, last.saturating_sub(first));
             activities.append(build_activity_dict(
                 py,
-                &rows,
+                &sliced,
                 Some(session),
                 &parsed.devices,
                 &parsed.developer_sensors,
