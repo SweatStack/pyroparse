@@ -1,6 +1,6 @@
 # Benchmark
 
-Single-file performance across **964** real activities (3,555,266 total rows).
+Single-file performance across **963** real activities (3,548,854 total rows).
 
 ## Environment
 
@@ -15,33 +15,33 @@ Single-file performance across **964** real activities (3,555,266 total rows).
 
 All files read from and written to the internal SSD. No network I/O.
 Each operation is measured once per file (no repeated iterations) across
-964 files to capture real-world variance.
+963 files to capture real-world variance.
 
 ## Dataset
 
 | | |
 |---|---|
-| Activities | 964 |
-| Total rows | 3,555,266 |
-| Total FIT size | 218 MB |
-| Total Parquet size | 64 MB (27% median compression) |
+| Activities | 963 |
+| Total rows | 3,548,854 |
+| Total FIT size | 217 MB |
+| Total Parquet size | 80 MB (38% median compression) |
 
 ## Summary
 
 | Operation | median | p5 | p95 | max |
 |---|--:|--:|--:|--:|
-| **FIT full parse** | **15 ms** | 5.1 ms | 59 ms | 237 ms |
-| **FIT metadata scan** | **0.53 ms** | 0.21 ms | 1.9 ms | 4.4 ms |
-| **Parquet full load** | **1.3 ms** | 0.99 ms | 2.2 ms | 20 ms |
-| **Parquet metadata scan** | **0.19 ms** | 0.15 ms | 0.27 ms | 5.8 ms |
-| **Parquet write** | **1.9 ms** | 1.00 ms | 7.8 ms | 31 ms |
+| **FIT full parse** | **22 ms** | 6.7 ms | 85 ms | 447 ms |
+| **FIT metadata scan** | **0.52 ms** | 0.23 ms | 1.8 ms | 4.1 ms |
+| **Parquet full load** | **1.6 ms** | 1.1 ms | 2.8 ms | 12 ms |
+| **Parquet metadata scan** | **0.23 ms** | 0.17 ms | 0.35 ms | 2.9 ms |
+| **Parquet write** | **2.7 ms** | 1.4 ms | 11 ms | 105 ms |
 
 ### Parquet vs FIT speedup
 
 | Operation | median speedup |
 |---|--:|
-| Full load | **11x** |
-| Metadata scan | **3x** |
+| Full load | **13x** |
+| Metadata scan | **2x** |
 
 ## FIT parse time vs file size
 
@@ -67,14 +67,14 @@ file) — effectively O(1) regardless of how large the file is.
 
 ## Column projection: all columns vs power only
 
-Tested on the **707** activities that have power data.
+Tested on the **706** activities that have power data.
 
 Loading only `["timestamp", "power"]` instead of all 12 columns:
 
 | Load mode | FIT median | Parquet median |
 |---|--:|--:|
-| All columns | 16 ms | 1.3 ms |
-| Power only | 16 ms | 0.91 ms |
+| All columns | 25 ms | 1.6 ms |
+| Power only | 25 ms | 1.1 ms |
 
 FIT parse time is nearly identical — the Rust decoder must read the full
 binary stream regardless, and column selection only drops unwanted columns

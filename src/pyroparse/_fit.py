@@ -99,9 +99,9 @@ def _build_metadata(raw: dict) -> ActivityMetadata:
         ts = datetime.fromtimestamp(raw["start_time_local"], tz=timezone.utc)
         start_time_local = ts.replace(tzinfo=None)
 
-    devices = _deduplicate_devices(
-        [_build_device(d) for d in raw.get("devices", [])]
-    )
+    hw_devices = [_build_device(d) for d in raw.get("devices", [])]
+    dev_sensors = [_build_developer_sensor(s) for s in raw.get("developer_sensors", [])]
+    devices = _deduplicate_devices(_merge_devices(hw_devices, dev_sensors))
 
     metrics = set(raw.get("metrics", []))
     sport_raw = raw.get("sport")
@@ -141,6 +141,33 @@ def _deduplicate_devices(devices: list[Device]) -> list[Device]:
     return result
 
 
+def _merge_devices(
+    hw_devices: list[Device], dev_sensors: list[Device]
+) -> list[Device]:
+    """Merge DeviceInfo devices with developer-field-detected sensors.
+
+    If a developer sensor matches a hardware device by manufacturer,
+    enrich the hardware device with sensor_type and columns.
+    Unmatched developer sensors are added as device_type="developer".
+    """
+    merged = list(hw_devices)
+    matched_manufacturers: set[str] = set()
+
+    for sensor in dev_sensors:
+        found = False
+        for device in merged:
+            if device.manufacturer and device.manufacturer == sensor.manufacturer:
+                device.sensor_type = sensor.sensor_type
+                device.columns = sensor.columns
+                matched_manufacturers.add(sensor.manufacturer)
+                found = True
+                break
+        if not found:
+            merged.append(sensor)
+
+    return merged
+
+
 def _build_device(raw: dict) -> Device:
     manufacturer = raw.get("manufacturer")
     product = raw.get("product")
@@ -153,4 +180,19 @@ def _build_device(raw: dict) -> Device:
         product=product,
         serial_number=raw.get("serial_number"),
         device_type="creator" if is_creator else "sensor",
+    )
+
+
+def _build_developer_sensor(raw: dict) -> Device:
+    manufacturer = raw.get("manufacturer")
+    product = raw.get("product")
+    parts = [p for p in (manufacturer, product) if p]
+    name = " ".join(parts) if parts else None
+    return Device(
+        name=name,
+        manufacturer=manufacturer,
+        product=product,
+        device_type="developer",
+        sensor_type=raw.get("sensor_type"),
+        columns=raw.get("columns", []),
     )

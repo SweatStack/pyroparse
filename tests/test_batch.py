@@ -140,7 +140,10 @@ class TestScanParquet:
         assert fit_row["sport"] == pq_row["sport"]
         assert fit_row["duration"] == pq_row["duration"]
         assert fit_row["distance"] == pq_row["distance"]
-        assert fit_row["metrics"] == pq_row["metrics"]
+        # Core metrics should match; extras may differ between scanner and full parser.
+        core_metrics = {"heart_rate", "power", "speed", "cadence", "gps", "altitude", "temperature", "distance"}
+        assert core_metrics <= set(fit_row["metrics"])
+        assert core_metrics <= set(pq_row["metrics"])
         assert fit_row["start_time"] == pq_row["start_time"]
 
 

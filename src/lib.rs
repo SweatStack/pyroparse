@@ -1,8 +1,10 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::sync::Arc;
 
 use arrow::array::{
-    Float32Array, Float64Array, Int16Array, Int8Array, TimestampMicrosecondArray,
+    Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, StringArray,
+    TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -98,11 +100,287 @@ fn value_to_string(val: &Value) -> Option<String> {
     }
 }
 
+fn value_to_u8(val: &Value) -> Option<u8> {
+    match val {
+        Value::UInt8(v) => Some(*v),
+        Value::UInt16(v) => u8::try_from(*v).ok(),
+        Value::SInt16(v) => u8::try_from(*v).ok(),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic value type — for FIT fields outside the fixed schema
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+enum DynValue {
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+    Str(String),
+}
+
+impl DynValue {
+    fn arrow_type(&self) -> DataType {
+        match self {
+            Self::I8(_) => DataType::Int8,
+            Self::I16(_) => DataType::Int16,
+            Self::I32(_) => DataType::Int32,
+            Self::I64(_) => DataType::Int64,
+            Self::F32(_) => DataType::Float32,
+            Self::F64(_) => DataType::Float64,
+            Self::Str(_) => DataType::Utf8,
+        }
+    }
+
+    fn as_i8(&self) -> Option<i8> {
+        match self {
+            Self::I8(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    fn as_i16(&self) -> Option<i16> {
+        match self {
+            Self::I8(v) => Some(*v as i16),
+            Self::I16(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    fn as_i32(&self) -> Option<i32> {
+        match self {
+            Self::I8(v) => Some(*v as i32),
+            Self::I16(v) => Some(*v as i32),
+            Self::I32(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::I8(v) => Some(*v as i64),
+            Self::I16(v) => Some(*v as i64),
+            Self::I32(v) => Some(*v as i64),
+            Self::I64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    fn as_f32(&self) -> Option<f32> {
+        match self {
+            Self::I8(v) => Some(*v as f32),
+            Self::I16(v) => Some(*v as f32),
+            Self::F32(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    fn as_f64(&self) -> Option<f64> {
+        match self {
+            Self::I8(v) => Some(*v as f64),
+            Self::I16(v) => Some(*v as f64),
+            Self::I32(v) => Some(*v as f64),
+            Self::I64(v) => Some(*v as f64),
+            Self::F32(v) => Some(*v as f64),
+            Self::F64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+fn to_dyn_value(val: &Value) -> Option<DynValue> {
+    match val {
+        Value::SInt8(v) => Some(DynValue::I8(*v)),
+        Value::UInt8(v) => Some(DynValue::I16(*v as i16)),
+        Value::SInt16(v) => Some(DynValue::I16(*v)),
+        Value::UInt16(v) => Some(DynValue::I32(*v as i32)),
+        Value::SInt32(v) => Some(DynValue::I32(*v)),
+        Value::UInt32(v) => Some(DynValue::I64(*v as i64)),
+        Value::SInt64(v) => Some(DynValue::I64(*v)),
+        Value::UInt64(v) => Some(DynValue::I64(*v as i64)),
+        Value::Float32(v) => Some(DynValue::F32(*v)),
+        Value::Float64(v) => Some(DynValue::F64(*v)),
+        Value::String(s) => Some(DynValue::Str(s.clone())),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Field name normalization
+// ---------------------------------------------------------------------------
+
+/// Normalize a FIT field name to a clean column name.
+///
+/// "Form Power" → "form_power", "DragFactor" → "drag_factor",
+/// "heart_rate" → "heart_rate" (unchanged).
+fn normalize_field_name(name: &str) -> String {
+    let mut result = String::with_capacity(name.len() + 4);
+    let chars: Vec<char> = name.chars().collect();
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch == ' ' {
+            result.push('_');
+        } else if ch.is_ascii_uppercase() && i > 0 && chars[i - 1].is_ascii_lowercase() {
+            result.push('_');
+            result.push(ch.to_ascii_lowercase());
+        } else {
+            result.push(ch.to_ascii_lowercase());
+        }
+    }
+    result
+}
+
+/// The 12 fixed columns — these are never added to `extra`.
+fn is_fixed_column(name: &str) -> bool {
+    matches!(
+        name,
+        "timestamp"
+            | "heart_rate"
+            | "power"
+            | "cadence"
+            | "speed"
+            | "position_lat"
+            | "position_long"
+            | "altitude"
+            | "temperature"
+            | "distance"
+            | "core_temperature"
+            | "smo2"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Sensor classification — identify sensors from developer field names
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct DeveloperSensor {
+    manufacturer: String,
+    product: String,
+    sensor_type: String,
+    columns: Vec<String>,
+}
+
+/// Map a developer field name to a fixed column, if it contributes to one.
+fn developer_field_to_fixed(name: &str) -> Option<&'static str> {
+    match name {
+        "Power" => Some("power"),
+        "Core Body Temperature" | "core_temperature" => Some("core_temperature"),
+        "Current Saturated Hemoglobin Percent" | "SmO2" | "smo2"
+        | "saturated_hemoglobin_percent" => Some("smo2"),
+        _ => None,
+    }
+}
+
+/// Classify a single developer field name to its originating sensor.
+/// Returns (manufacturer, product, sensor_type).
+fn sensor_for_field(name: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    let lower = name.to_lowercase();
+
+    // CORE body temperature sensor (check before Stryd — more specific patterns)
+    if (lower.contains("core") && lower.contains("temp"))
+        || (lower.contains("skin") && lower.contains("temp"))
+        || lower.starts_with("ciq_core")
+        || lower.starts_with("ciq_skin")
+        || lower == "core_data_quality"
+        || lower == "core_reserved"
+    {
+        return Some(("core", "CORE", "core_temp"));
+    }
+
+    // Stryd foot pod
+    if lower == "power"
+        || lower == "form power"
+        || lower == "air power"
+        || lower == "ground time"
+        || lower == "leg spring stiffness"
+        || lower == "vertical oscillation"
+        || lower.contains("stryd")
+        || lower == "dragfactor"
+        || lower == "drag factor"
+        || lower == "strokelength"
+        || lower == "stroke length"
+    {
+        return Some(("stryd", "Stryd", "foot_pod"));
+    }
+
+    // Muscle oxygen (Moxy, Humon, Train.Red)
+    if lower.contains("muscle oxygen")
+        || lower == "smo2"
+        || lower.contains("hemoglobin")
+    {
+        return Some(("unknown", "Muscle Oxygen Sensor", "muscle_oxygen"));
+    }
+
+    None
+}
+
+/// Determine the output column name for a developer field.
+/// Returns None if the field would collide with a standard column and gets skipped.
+fn column_for_developer_field(name: &str) -> Option<String> {
+    if let Some(norm) = developer_field_to_fixed(name) {
+        return Some(norm.to_string());
+    }
+    let normalized = normalize_field_name(name);
+    if is_fixed_column(&normalized) {
+        return None; // Redundant with standard field
+    }
+    Some(normalized)
+}
+
+/// Classify developer fields into sensors based on individual field names.
+///
+/// Works across developer_data_index boundaries — a single CIQ app can
+/// report data from multiple physical sensors (e.g. Stryd relaying CORE data).
+fn classify_developer_sensors(
+    dev_field_groups: &BTreeMap<u8, Vec<String>>,
+    present_extra_columns: &BTreeSet<String>,
+) -> Vec<DeveloperSensor> {
+    // Classify each field individually, group by sensor.
+    let mut sensor_columns: BTreeMap<
+        (&str, &str, &str), // (manufacturer, product, sensor_type)
+        BTreeSet<String>,
+    > = BTreeMap::new();
+
+    for name in dev_field_groups.values().flatten() {
+        if let Some(sensor) = sensor_for_field(name) {
+            if let Some(col) = column_for_developer_field(name) {
+                // Only include columns that actually appear in the output.
+                let exists = present_extra_columns.contains(&col) || is_fixed_column(&col);
+                if exists {
+                    sensor_columns.entry(sensor).or_default().insert(col);
+                }
+            }
+        }
+    }
+
+    sensor_columns
+        .into_iter()
+        .map(|((manufacturer, product, sensor_type), cols)| DeveloperSensor {
+            manufacturer: manufacturer.into(),
+            product: product.into(),
+            sensor_type: sensor_type.into(),
+            columns: cols.into_iter().collect(),
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Data structures
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct RecordRow {
     timestamp: Option<i64>,
     heart_rate: Option<i16>,
@@ -114,9 +392,10 @@ struct RecordRow {
     altitude: Option<f32>,
     temperature: Option<i8>,
     distance: Option<f64>,
-    // Developer fields (filled by second pass).
     core_temperature: Option<f32>,
     smo2: Option<f32>,
+    /// All other fields not in the fixed schema.
+    extra: BTreeMap<String, DynValue>,
 }
 
 #[derive(Default)]
@@ -144,6 +423,7 @@ struct ParseResult {
     records: Vec<RecordRow>,
     sessions: Vec<SessionMeta>,
     devices: Vec<DeviceMeta>,
+    developer_sensors: Vec<DeveloperSensor>,
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +434,7 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
     let mut records = Vec::new();
     let mut sessions = Vec::new();
     let mut devices = Vec::new();
+    let mut dev_field_groups: BTreeMap<u8, Vec<String>> = BTreeMap::new();
 
     for msg in messages {
         match msg.kind() {
@@ -161,6 +442,7 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                 let mut row = RecordRow::default();
                 for field in msg.fields() {
                     match field.name() {
+                        // === Normalized columns (stable schema) ===
                         "timestamp" => row.timestamp = value_to_timestamp_us(field.value()),
                         "heart_rate" => row.heart_rate = value_to_i16(field.value()),
                         "power" => row.power = value_to_i16(field.value()),
@@ -179,7 +461,7 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                         }
                         "temperature" => row.temperature = value_to_i8(field.value()),
                         "distance" => row.distance = value_to_f64(field.value()),
-                        // Developer fields (fitparser 0.10+ includes them in fields()).
+                        // === Developer fields → fixed columns ===
                         "Power" if row.power.is_none() => {
                             row.power = value_to_i16(field.value())
                         }
@@ -190,7 +472,15 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                         | "saturated_hemoglobin_percent" => {
                             row.smo2 = value_to_f32(field.value())
                         }
-                        _ => {}
+                        // === Everything else → extra columns ===
+                        other => {
+                            let name = normalize_field_name(other);
+                            if !is_fixed_column(&name) {
+                                if let Some(val) = to_dyn_value(field.value()) {
+                                    row.extra.entry(name).or_insert(val);
+                                }
+                            }
+                        }
                     }
                 }
                 records.push(row);
@@ -243,11 +533,38 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                     devices.push(device);
                 }
             }
+            MesgNum::FieldDescription => {
+                let mut dev_idx: Option<u8> = None;
+                let mut field_name: Option<String> = None;
+                for field in msg.fields() {
+                    match field.name() {
+                        "developer_data_index" => dev_idx = value_to_u8(field.value()),
+                        "field_name" => field_name = value_to_string(field.value()),
+                        _ => {}
+                    }
+                }
+                if let (Some(idx), Some(name)) = (dev_idx, field_name) {
+                    if !name.is_empty() {
+                        dev_field_groups.entry(idx).or_default().push(name);
+                    }
+                }
+            }
             _ => {}
         }
     }
 
-    ParseResult { records, sessions, devices }
+    let present_extra_columns: BTreeSet<String> = records
+        .iter()
+        .flat_map(|r| r.extra.keys().cloned())
+        .collect();
+    let developer_sensors = classify_developer_sensors(&dev_field_groups, &present_extra_columns);
+
+    ParseResult {
+        records,
+        sessions,
+        devices,
+        developer_sensors,
+    }
 }
 
 fn read_fit_messages(reader: &mut impl Read) -> PyResult<Vec<fitparser::FitDataRecord>> {
@@ -264,8 +581,90 @@ fn parse_all_from_bytes(data: &[u8]) -> PyResult<ParseResult> {
 // Arrow schema & batch construction
 // ---------------------------------------------------------------------------
 
-fn build_schema() -> Schema {
-    Schema::new(vec![
+/// Promote two Arrow types to the wider compatible type.
+fn promote_type(a: &DataType, b: &DataType) -> DataType {
+    if a == b {
+        return a.clone();
+    }
+    match (a, b) {
+        // Integer widening
+        (DataType::Int8, DataType::Int16) | (DataType::Int16, DataType::Int8) => DataType::Int16,
+        (DataType::Int8 | DataType::Int16, DataType::Int32)
+        | (DataType::Int32, DataType::Int8 | DataType::Int16) => DataType::Int32,
+        (DataType::Int8 | DataType::Int16 | DataType::Int32, DataType::Int64)
+        | (DataType::Int64, DataType::Int8 | DataType::Int16 | DataType::Int32) => DataType::Int64,
+        // Float widening
+        (DataType::Float32, DataType::Float64) | (DataType::Float64, DataType::Float32) => {
+            DataType::Float64
+        }
+        // Integer + Float → Float64
+        (DataType::Utf8, _) | (_, DataType::Utf8) => DataType::Utf8,
+        _ => DataType::Float64,
+    }
+}
+
+/// Discover the extra columns present across all rows, with their Arrow types.
+/// Returns (name, type) pairs sorted alphabetically by name.
+fn discover_extra_columns(rows: &[RecordRow]) -> Vec<(String, DataType)> {
+    let mut columns: BTreeMap<String, DataType> = BTreeMap::new();
+    for row in rows {
+        for (name, val) in &row.extra {
+            let new_type = val.arrow_type();
+            columns
+                .entry(name.clone())
+                .and_modify(|existing| *existing = promote_type(existing, &new_type))
+                .or_insert(new_type);
+        }
+    }
+    columns.into_iter().collect()
+}
+
+/// Build an Arrow array for a single extra column across all rows.
+fn build_extra_array(
+    rows: &[RecordRow],
+    name: &str,
+    dtype: &DataType,
+) -> Arc<dyn arrow::array::Array> {
+    match dtype {
+        DataType::Int8 => Arc::new(Int8Array::from_iter(
+            rows.iter().map(|r| r.extra.get(name).and_then(|v| v.as_i8())),
+        )),
+        DataType::Int16 => Arc::new(Int16Array::from_iter(
+            rows.iter()
+                .map(|r| r.extra.get(name).and_then(|v| v.as_i16())),
+        )),
+        DataType::Int32 => Arc::new(Int32Array::from_iter(
+            rows.iter()
+                .map(|r| r.extra.get(name).and_then(|v| v.as_i32())),
+        )),
+        DataType::Int64 => Arc::new(Int64Array::from_iter(
+            rows.iter()
+                .map(|r| r.extra.get(name).and_then(|v| v.as_i64())),
+        )),
+        DataType::Float32 => Arc::new(Float32Array::from_iter(
+            rows.iter()
+                .map(|r| r.extra.get(name).and_then(|v| v.as_f32())),
+        )),
+        DataType::Float64 => Arc::new(Float64Array::from_iter(
+            rows.iter()
+                .map(|r| r.extra.get(name).and_then(|v| v.as_f64())),
+        )),
+        DataType::Utf8 => {
+            let arr: StringArray = rows
+                .iter()
+                .map(|r| r.extra.get(name).and_then(|v| v.as_str()))
+                .collect();
+            Arc::new(arr)
+        }
+        _ => unreachable!("unexpected extra column type"),
+    }
+}
+
+fn rows_to_batch(rows: &[RecordRow]) -> PyResult<RecordBatch> {
+    let extra_cols = discover_extra_columns(rows);
+
+    // Build schema: fixed columns first, then extras alphabetically.
+    let mut fields = vec![
         Field::new(
             "timestamp",
             DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
@@ -282,12 +681,14 @@ fn build_schema() -> Schema {
         Field::new("distance", DataType::Float64, true),
         Field::new("core_temperature", DataType::Float32, true),
         Field::new("smo2", DataType::Float32, true),
-    ])
-}
+    ];
+    for (name, dtype) in &extra_cols {
+        fields.push(Field::new(name, dtype.clone(), true));
+    }
+    let schema = Schema::new(fields);
 
-fn rows_to_batch(rows: &[RecordRow]) -> PyResult<RecordBatch> {
-    let schema = build_schema();
-    let arrays: Vec<Arc<dyn arrow::array::Array>> = vec![
+    // Build arrays: fixed columns first.
+    let mut arrays: Vec<Arc<dyn arrow::array::Array>> = vec![
         Arc::new(
             TimestampMicrosecondArray::from(
                 rows.iter().map(|r| r.timestamp).collect::<Vec<_>>(),
@@ -306,6 +707,9 @@ fn rows_to_batch(rows: &[RecordRow]) -> PyResult<RecordBatch> {
         Arc::new(Float32Array::from_iter(rows.iter().map(|r| r.core_temperature))),
         Arc::new(Float32Array::from_iter(rows.iter().map(|r| r.smo2))),
     ];
+    for (name, dtype) in &extra_cols {
+        arrays.push(build_extra_array(rows, name, dtype));
+    }
 
     RecordBatch::try_new(Arc::new(schema), arrays)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
@@ -327,6 +731,14 @@ fn detect_metrics(rows: &[RecordRow]) -> Vec<String> {
     if rows.iter().any(|r| r.distance.is_some()) { metrics.push("distance".into()); }
     if rows.iter().any(|r| r.core_temperature.is_some()) { metrics.push("core_temperature".into()); }
     if rows.iter().any(|r| r.smo2.is_some()) { metrics.push("smo2".into()); }
+
+    // Extra columns — any that appear have at least one non-null value.
+    let mut extra_names: BTreeSet<String> = BTreeSet::new();
+    for row in rows {
+        extra_names.extend(row.extra.keys().cloned());
+    }
+    metrics.extend(extra_names);
+
     metrics
 }
 
@@ -361,11 +773,28 @@ fn device_to_dict<'py>(
     Ok(dict)
 }
 
+fn sensor_to_dict<'py>(
+    py: Python<'py>,
+    sensor: &DeveloperSensor,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new_bound(py);
+    dict.set_item("manufacturer", &sensor.manufacturer)?;
+    dict.set_item("product", &sensor.product)?;
+    dict.set_item("sensor_type", &sensor.sensor_type)?;
+    let cols = PyList::empty_bound(py);
+    for c in &sensor.columns {
+        cols.append(c)?;
+    }
+    dict.set_item("columns", cols)?;
+    Ok(dict)
+}
+
 fn build_activity_dict<'py>(
     py: Python<'py>,
     rows: &[RecordRow],
     session: Option<&SessionMeta>,
     devices: &[DeviceMeta],
+    developer_sensors: &[DeveloperSensor],
 ) -> PyResult<Bound<'py, PyDict>> {
     let batch = rows_to_batch(rows)?;
     let metrics = detect_metrics(rows);
@@ -399,6 +828,12 @@ fn build_activity_dict<'py>(
     }
     meta.set_item("devices", devices_list)?;
 
+    let sensors_list = PyList::empty_bound(py);
+    for s in developer_sensors {
+        sensors_list.append(sensor_to_dict(py, s)?)?;
+    }
+    meta.set_item("developer_sensors", sensors_list)?;
+
     activity.set_item("metadata", meta)?;
     Ok(activity)
 }
@@ -410,34 +845,31 @@ fn build_parse_result_dict(py: Python<'_>, parsed: ParseResult) -> PyResult<PyOb
     if parsed.sessions.len() <= 1 {
         let session = parsed.sessions.first();
         activities.append(build_activity_dict(
-            py, &parsed.records, session, &parsed.devices,
+            py,
+            &parsed.records,
+            session,
+            &parsed.devices,
+            &parsed.developer_sensors,
         )?)?;
     } else {
         for session in &parsed.sessions {
             let start = session.start_timestamp_us.unwrap_or(i64::MIN);
             let end = session.end_timestamp_us.unwrap_or(i64::MAX);
-            let rows: Vec<RecordRow> = parsed.records.iter()
+            let rows: Vec<RecordRow> = parsed
+                .records
+                .iter()
                 .filter(|r| {
                     let ts = r.timestamp.unwrap_or(0);
                     ts >= start && ts <= end
                 })
-                .map(|r| RecordRow {
-                    timestamp: r.timestamp,
-                    heart_rate: r.heart_rate,
-                    power: r.power,
-                    cadence: r.cadence,
-                    speed: r.speed,
-                    position_lat: r.position_lat,
-                    position_long: r.position_long,
-                    altitude: r.altitude,
-                    temperature: r.temperature,
-                    distance: r.distance,
-                    core_temperature: r.core_temperature,
-                    smo2: r.smo2,
-                })
+                .cloned()
                 .collect();
             activities.append(build_activity_dict(
-                py, &rows, Some(session), &parsed.devices,
+                py,
+                &rows,
+                Some(session),
+                &parsed.devices,
+                &parsed.developer_sensors,
             )?)?;
         }
     }
@@ -542,6 +974,7 @@ struct ScanResult {
     devices: Vec<DeviceMeta>,
     local_timestamp: Option<f64>,
     record_metrics: Vec<String>,
+    developer_sensors: Vec<DeveloperSensor>,
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +1002,7 @@ impl<'a> FitScanner<'a> {
     fn scan(&mut self) -> Result<ScanResult, String> {
         let mut result = ScanResult::default();
         let mut metric_set = std::collections::HashSet::new();
+        let mut dev_field_groups: BTreeMap<u8, Vec<String>> = BTreeMap::new();
 
         while self.pos < self.end {
             let header = self.read_byte()?;
@@ -586,10 +1020,6 @@ impl<'a> FitScanner<'a> {
                         for m in Self::detect_metrics_from_def(def) {
                             metric_set.insert(m);
                         }
-                        // Check for developer fields in the Record definition.
-                        // If the definition has developer fields, add potential dev metrics.
-                        // (We can't know the names without FieldDescription, but presence
-                        //  is a signal that developer data exists.)
                     }
                 }
             } else {
@@ -619,9 +1049,17 @@ impl<'a> FitScanner<'a> {
                             }
                         }
                         MESG_FIELD_DESCRIPTION => {
-                            // Developer field name is in field 3.
                             if let Some(metric) = Self::decode_developer_metric(&fields) {
                                 metric_set.insert(metric);
+                            }
+                            if let Some((idx, name)) =
+                                Self::decode_developer_field_info(&fields)
+                            {
+                                let normalized = normalize_field_name(&name);
+                                if !is_fixed_column(&normalized) {
+                                    metric_set.insert(normalized);
+                                }
+                                dev_field_groups.entry(idx).or_default().push(name);
                             }
                         }
                         _ => {}
@@ -631,6 +1069,14 @@ impl<'a> FitScanner<'a> {
         }
 
         result.record_metrics = metric_set.into_iter().collect();
+        // Scanner doesn't parse records, so we use the developer field names
+        // themselves as "present columns" for sensor classification.
+        let dev_columns: BTreeSet<String> = dev_field_groups
+            .values()
+            .flatten()
+            .filter_map(|n| column_for_developer_field(n))
+            .collect();
+        result.developer_sensors = classify_developer_sensors(&dev_field_groups, &dev_columns);
 
         if let Some(lt) = result.local_timestamp {
             for s in &mut result.sessions {
@@ -805,6 +1251,28 @@ impl<'a> FitScanner<'a> {
         None
     }
 
+    /// Extract (developer_data_index, field_name) from a FieldDescription message.
+    fn decode_developer_field_info(fields: &[(u8, Vec<u8>)]) -> Option<(u8, String)> {
+        let mut dev_idx: Option<u8> = None;
+        let mut name: Option<String> = None;
+        for (num, data) in fields {
+            match *num {
+                0 => dev_idx = data.first().copied(), // developer_data_index
+                3 => {
+                    // field_name
+                    let s = String::from_utf8_lossy(data)
+                        .trim_end_matches('\0')
+                        .to_string();
+                    if !s.is_empty() {
+                        name = Some(s);
+                    }
+                }
+                _ => {}
+            }
+        }
+        dev_idx.zip(name)
+    }
+
     fn decode_device(fields: &[(u8, Vec<u8>)], big_endian: bool) -> Option<DeviceMeta> {
         let mut d = DeviceMeta::default();
         for (num, data) in fields {
@@ -859,6 +1327,9 @@ fn build_scan_result_dict(py: Python<'_>, scan: &ScanResult) -> PyResult<PyObjec
         let devices_list = PyList::empty_bound(py);
         for d in &scan.devices { devices_list.append(device_to_dict(py, d)?)?; }
         meta.set_item("devices", devices_list)?;
+        let sensors_list = PyList::empty_bound(py);
+        for s in &scan.developer_sensors { sensors_list.append(sensor_to_dict(py, s)?)?; }
+        meta.set_item("developer_sensors", sensors_list)?;
         activity.set_item("metadata", meta)?;
         Ok(activity)
     };
@@ -874,6 +1345,9 @@ fn build_scan_result_dict(py: Python<'_>, scan: &ScanResult) -> PyResult<PyObjec
         for m in &scan.record_metrics { metrics_list.append(m)?; }
         meta.set_item("metrics", metrics_list)?;
         meta.set_item("devices", PyList::empty_bound(py))?;
+        let sensors_list = PyList::empty_bound(py);
+        for s in &scan.developer_sensors { sensors_list.append(sensor_to_dict(py, s)?)?; }
+        meta.set_item("developer_sensors", sensors_list)?;
         activity.set_item("metadata", meta)?;
         activities.append(activity)?;
     } else {

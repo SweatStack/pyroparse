@@ -23,3 +23,10 @@ python-source = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "matplotlib>=3.10.8",
+    "maturin>=1.12.6",
+    "pytest>=9.0.2",
+]

@@ -10,7 +10,9 @@ class Device:
     manufacturer: str | None = None
     product: str | None = None
     serial_number: str | None = None
-    device_type: str | None = None  # "creator" or "sensor"
+    device_type: str | None = None  # "creator", "sensor", or "developer"
+    sensor_type: str | None = None  # e.g. "foot_pod", "core_temp", "muscle_oxygen"
+    columns: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -24,6 +26,13 @@ class ActivityMetadata:
     metrics: set[str] = field(default_factory=set)
     devices: list[Device] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
+
+    def column_source(self, column: str) -> Device | None:
+        """Return the device that produced the given column, or None."""
+        for device in self.devices:
+            if column in device.columns:
+                return device
+        return None
 
 
 def merge_metadata(

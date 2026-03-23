@@ -233,7 +233,7 @@ def load_fit_batch(
     if not tables:
         return pa.table({"file_path": pa.array([], type=pa.utf8())})
 
-    return pa.concat_tables(tables, promote_options="default")
+    return pa.concat_tables(tables, promote_options="permissive")
 
 
 def _load_one(path: str, columns: list[str] | None) -> pa.Table:
