@@ -194,7 +194,9 @@ def _scan_one_parquet(path: Path) -> dict:
 def load_fit_batch(
     paths: list[str],
     *,
-    columns: list[str] | None = None,
+    columns: list[str] | str | None = None,
+    extra_columns: list[str] | None = None,
+    missing: str = "raise",
     errors: str = "warn",
 ) -> pa.Table:
     """Parse multiple ``.fit`` files and concatenate into one table.
@@ -206,19 +208,30 @@ def load_fit_batch(
     ----------
     paths : list[str]
         File paths to load.
-    columns : list[str] | None
-        Data columns to keep (e.g. ``["timestamp", "power"]``).
+    columns : list[str] | "all" | None
+        ``None`` (default): the 12 standard columns.
+        ``"all"``: all columns including extras.
+        Explicit list: exactly those columns.
         ``file_path`` is always included regardless.
+    extra_columns : list[str] | None
+        Additional columns on top of the standard set.
+        Only valid when *columns* is ``None``.
+    missing : str
+        ``"raise"`` (default): error on missing columns.
+        ``"ignore"``: fill missing columns with null.
     errors : str
-        ``"warn"`` (default) skips failures with a warning.
-        ``"raise"`` fails immediately.
+        ``"warn"`` (default) skips corrupt files with a warning.
+        ``"raise"`` fails immediately on the first error.
     """
     if not paths:
         return pa.table({"file_path": pa.array([], type=pa.utf8())})
 
     tables: list[pa.Table] = []
     with ThreadPoolExecutor() as pool:
-        futures = {pool.submit(_load_one, p, columns): p for p in paths}
+        futures = {
+            pool.submit(_load_one, p, columns, extra_columns, missing): p
+            for p in paths
+        }
         for future in as_completed(futures):
             try:
                 tables.append(future.result())
@@ -236,8 +249,15 @@ def load_fit_batch(
     return pa.concat_tables(tables, promote_options="permissive")
 
 
-def _load_one(path: str, columns: list[str] | None) -> pa.Table:
-    activity = Activity.load_fit(path, columns=columns)
+def _load_one(
+    path: str,
+    columns: list[str] | str | None,
+    extra_columns: list[str] | None,
+    missing: str,
+) -> pa.Table:
+    activity = Activity.load_fit(
+        path, columns=columns, extra_columns=extra_columns, missing=missing,
+    )
     table = activity.data
     file_path_col = pa.array([str(path)] * table.num_rows, type=pa.utf8())
     return table.add_column(0, pa.field("file_path", pa.utf8()), file_path_col)

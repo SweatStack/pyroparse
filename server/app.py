@@ -26,6 +26,14 @@ async def convert(request: Request) -> Response:
     form = await request.form()
     upload = form["file"]
     fmt = form.get("format", "parquet")
+    columns_raw = form.get("columns", "standard")
+
+    if columns_raw in ("standard", ""):
+        columns = None
+    elif columns_raw == "all":
+        columns = "all"
+    else:
+        columns = [c.strip() for c in columns_raw.split(",") if c.strip()]
 
     contents = await upload.read()
 
@@ -34,7 +42,7 @@ async def convert(request: Request) -> Response:
         tmp_path = Path(tmp.name)
 
     try:
-        activity = Activity.load_fit(tmp_path)
+        activity = Activity.load_fit(tmp_path, columns=columns)
     finally:
         tmp_path.unlink()
 

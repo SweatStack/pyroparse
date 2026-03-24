@@ -48,6 +48,11 @@
     <form action="/convert" method="post" enctype="multipart/form-data">
       <label for="file">.fit file</label>
       <input type="file" id="file" name="file" accept=".fit" required>
+      <label for="columns">columns</label>
+      <select id="columns" name="columns">
+        <option value="standard">Standard columns</option>
+        <option value="all">All columns (incl. extras)</option>
+      </select>
       <label for="format">output format</label>
       <select id="format" name="format">
         <option value="parquet">parquet</option>
@@ -78,14 +83,17 @@
   <script>
     var base = window.location.origin;
     var formatEl = document.getElementById("format");
+    var columnsEl = document.getElementById("columns");
 
     function updateExamples() {
       var fmt = formatEl.value;
+      var cols = columnsEl.value;
       var ext = fmt === "csv" ? "csv" : "parquet";
 
       document.getElementById("ex-curl").textContent = [
         "curl \\",
         "  -F file=@activity.fit \\",
+        "  -F columns=" + cols + " \\",
         "  -F format=" + fmt + " \\",
         "  -o activity." + ext + " \\",
         "  " + base + "/convert"
@@ -98,7 +106,7 @@
         "    resp = httpx.post(",
         '        "' + base + '/convert",',
         '        files={"file": ("activity.fit", f, "application/octet-stream")},',
-        '        data={"format": "' + fmt + '"},',
+        '        data={"columns": "' + cols + '", "format": "' + fmt + '"},',
         "    )",
         "",
         'with open("activity.' + ext + '", "wb") as f:',
@@ -111,6 +119,7 @@
         'resp <- request("' + base + '/convert") |>',
         "  req_body_multipart(",
         '    file = curl::form_file("activity.fit"),',
+        '    columns = "' + cols + '",',
         '    format = "' + fmt + '"',
         "  ) |>",
         "  req_perform()",
@@ -120,6 +129,7 @@
     }
 
     formatEl.addEventListener("change", updateExamples);
+    columnsEl.addEventListener("change", updateExamples);
     updateExamples();
 
     document.querySelectorAll(".copy-btn").forEach(function(btn) {

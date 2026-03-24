@@ -6,6 +6,7 @@ from typing import BinaryIO, Callable
 import pyarrow as pa
 
 from pyroparse._metadata import ActivityMetadata, merge_metadata
+from pyroparse._schema import select_columns
 
 Source = str | os.PathLike[str] | bytes | BinaryIO
 PathSource = str | os.PathLike[str]
@@ -51,14 +52,15 @@ class Activity:
         cls,
         source: Source,
         *,
-        columns: list[str] | None = None,
+        columns: list[str] | str | None = None,
+        extra_columns: list[str] | None = None,
+        missing: str = "raise",
         metadata: dict | None = None,
     ) -> Activity:
         from pyroparse._fit import load_fit
 
         data, file_meta = load_fit(source, metadata=metadata)
-        if columns is not None:
-            data = data.select(columns)
+        data = select_columns(data, columns, extra_columns, missing)
         return cls(data, file_meta)
 
     @classmethod
@@ -66,12 +68,15 @@ class Activity:
         cls,
         source: Source,
         *,
-        columns: list[str] | None = None,
+        columns: list[str] | str | None = None,
+        extra_columns: list[str] | None = None,
+        missing: str = "raise",
         metadata: dict | None = None,
     ) -> Activity:
         from pyroparse._parquet import read_parquet
 
-        data, file_meta = read_parquet(source, columns=columns)
+        data, file_meta = read_parquet(source)
+        data = select_columns(data, columns, extra_columns, missing)
         return cls(data, merge_metadata(file_meta, metadata))
 
     @classmethod
@@ -79,14 +84,15 @@ class Activity:
         cls,
         source: Source,
         *,
-        columns: list[str] | None = None,
+        columns: list[str] | str | None = None,
+        extra_columns: list[str] | None = None,
+        missing: str = "raise",
         metadata: dict | None = None,
     ) -> Activity:
         from pyroparse._csv import read_csv
 
         data, inferred = read_csv(source)
-        if columns is not None:
-            data = data.select(columns)
+        data = select_columns(data, columns, extra_columns, missing)
         return cls(data, merge_metadata(inferred, metadata))
 
     # -- Lazy loaders ----------------------------------------------------------
@@ -96,7 +102,9 @@ class Activity:
         cls,
         path: PathSource,
         *,
-        columns: list[str] | None = None,
+        columns: list[str] | str | None = None,
+        extra_columns: list[str] | None = None,
+        missing: str = "raise",
         metadata: dict | None = None,
     ) -> Activity:
         """Load metadata now, defer record data until ``.data`` is accessed.
@@ -112,9 +120,7 @@ class Activity:
 
         def loader() -> pa.Table:
             data, _ = load_fit(resolved)
-            if columns is not None:
-                return data.select(columns)
-            return data
+            return select_columns(data, columns, extra_columns, missing)
 
         return cls(None, file_meta, _loader=loader)
 
@@ -123,7 +129,9 @@ class Activity:
         cls,
         path: PathSource,
         *,
-        columns: list[str] | None = None,
+        columns: list[str] | str | None = None,
+        extra_columns: list[str] | None = None,
+        missing: str = "raise",
         metadata: dict | None = None,
     ) -> Activity:
         """Load schema metadata now, defer row data until ``.data`` is accessed."""
@@ -134,8 +142,8 @@ class Activity:
         merged = merge_metadata(file_meta, metadata)
 
         def loader() -> pa.Table:
-            data, _ = read_parquet(resolved, columns=columns)
-            return data
+            data, _ = read_parquet(resolved)
+            return select_columns(data, columns, extra_columns, missing)
 
         return cls(None, merged, _loader=loader)
 
