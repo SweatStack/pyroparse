@@ -139,30 +139,48 @@ fn value_to_u8(val: &Value) -> Option<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Canonical merge helpers — developer field values enrich standard fields
+// Per-session merge — count non-null non-zero values to pick the winner
 // ---------------------------------------------------------------------------
 
-/// Merge a developer i16 value into a canonical column.
-///
-/// Developer value wins when the canonical value is absent or zero.
-/// This handles multi-sport files where a standard field carries a
-/// placeholder 0 for sports that don't use that sensor.
-fn merge_i16(canonical: &mut Option<i16>, val: &Value) {
-    if canonical.unwrap_or(0) == 0 {
-        if let Some(v) = value_to_i16(val) {
-            *canonical = Some(v);
-        }
-    }
+/// Count non-null non-zero values in a column across a record slice.
+fn count_nonzero_i16(records: &[RecordRow], accessor: impl Fn(&RecordRow) -> Option<i16>) -> u32 {
+    records
+        .iter()
+        .filter(|r| accessor(r).unwrap_or(0) != 0)
+        .count() as u32
 }
 
-/// Merge a developer f32 value into a canonical column.
-fn merge_f32(canonical: &mut Option<f32>, val: &Value) {
-    if canonical.unwrap_or(0.0) == 0.0 {
-        if let Some(v) = value_to_f32(val) {
-            *canonical = Some(v);
-        }
-    }
+/// Canonical columns that can come from either a standard FIT field or a
+/// developer field.  Each entry describes one such pair.
+struct MergeableColumn {
+    /// Column name in the output schema (e.g. "power").
+    name: &'static str,
+    /// ANT+ device_type values that identify the standard-field source device.
+    ant_device_types: &'static [u8],
+    /// Manufacturers known to produce this metric (fallback when ANT+ device
+    /// type is absent — common for Bluetooth/ANT-FS fitness equipment).
+    known_manufacturers: &'static [&'static str],
 }
+
+const MERGEABLE_COLUMNS: &[MergeableColumn] = &[
+    MergeableColumn {
+        name: "power",
+        ant_device_types: &[11], // bike_power
+        known_manufacturers: &[
+            "wahoo_fitness",
+            "stages_cycling",
+            "favero",
+            "wattbike",
+            "concept2",
+            "shimano",
+        ],
+    },
+    MergeableColumn {
+        name: "cadence",
+        ant_device_types: &[121, 122], // bike_speed_cadence, stride_speed_distance
+        known_manufacturers: &[],
+    },
+];
 
 // ---------------------------------------------------------------------------
 // Column-oriented storage for extra (non-fixed) FIT fields
@@ -311,7 +329,7 @@ fn is_handled_field(name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Sensor classification — identify sensors from developer field names
+// Sensor classification — identify CIQ apps from DeveloperDataId UUIDs
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -320,6 +338,101 @@ struct DeveloperSensor {
     product: String,
     sensor_type: String,
     columns: Vec<String>,
+}
+
+/// A known CIQ application: UUID, identity, and a filter function that
+/// decides which developer fields belong to this sensor.
+struct KnownCiqApp {
+    uuid: &'static str,
+    manufacturer: &'static str,
+    product: &'static str,
+    sensor_type: &'static str,
+    /// Return true if this field name belongs to this sensor.
+    /// When a CIQ app relays data from multiple physical sensors (common
+    /// pattern), each sensor's filter claims only its own fields.
+    owns_field: fn(&str) -> bool,
+}
+
+/// Check if a field name is a body temperature field (CORE sensor).
+fn is_core_field(name: &str) -> bool {
+    let l = name.to_lowercase();
+    (l.contains("core") && l.contains("temp"))
+        || (l.contains("skin") && l.contains("temp"))
+        || l.starts_with("ciq_core")
+        || l.starts_with("ciq_skin")
+        || l == "core_data_quality"
+        || l == "core_reserved"
+}
+
+/// Check if a field name is a muscle oxygen field (Moxy/Humon/Train.Red).
+fn is_muscle_oxygen_field(name: &str) -> bool {
+    let l = name.to_lowercase();
+    l.contains("muscle oxygen") || l == "smo2" || l.contains("hemoglobin")
+}
+
+/// Known CIQ app UUIDs.  To add a new sensor, add a row with its UUID
+/// and a filter function for its field names.
+const KNOWN_CIQ_APPS: &[KnownCiqApp] = &[
+    KnownCiqApp {
+        uuid: "6957fe68-83fe-4ed6-8613-413f70624bb5",
+        manufacturer: "core",
+        product: "CORE",
+        sensor_type: "core_temp",
+        owns_field: is_core_field,
+    },
+    KnownCiqApp {
+        uuid: "9a0508b9-0256-4639-88b3-a2690a14ddf9",
+        manufacturer: "concept2",
+        product: "Concept2",
+        sensor_type: "rowing_erg",
+        owns_field: |name| !is_core_field(name) && !is_muscle_oxygen_field(name),
+    },
+    KnownCiqApp {
+        uuid: "18fb2cf0-1a4b-430d-ad66-988c847421f4",
+        manufacturer: "stryd",
+        product: "Stryd",
+        sensor_type: "foot_pod",
+        owns_field: |name| !is_core_field(name) && !is_muscle_oxygen_field(name),
+    },
+];
+
+/// Format 16 raw bytes as a lowercase UUID string (RFC 4122).
+fn bytes_to_uuid(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 16 {
+        return None;
+    }
+    Some(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-\
+         {:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11],
+        bytes[12], bytes[13], bytes[14], bytes[15],
+    ))
+}
+
+/// Extract a UUID string from a fitparser `Value::Array` of bytes.
+fn value_to_uuid(val: &Value) -> Option<String> {
+    match val {
+        Value::Array(arr) => {
+            let bytes: Vec<u8> = arr
+                .iter()
+                .filter_map(|v| match v {
+                    Value::Byte(b) | Value::UInt8(b) => Some(*b),
+                    _ => None,
+                })
+                .collect();
+            bytes_to_uuid(&bytes)
+        }
+        _ => None,
+    }
+}
+
+/// Look up a CIQ app UUID in the known-apps table.
+fn lookup_ciq_app(uuid: &str) -> Option<&'static KnownCiqApp> {
+    KNOWN_CIQ_APPS
+        .iter()
+        .find(|app| app.uuid.eq_ignore_ascii_case(uuid))
 }
 
 /// Map a developer field name to a fixed column, if it contributes to one.
@@ -333,49 +446,6 @@ fn developer_field_to_fixed(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Classify a single developer field name to its originating sensor.
-/// Returns (manufacturer, product, sensor_type).
-fn sensor_for_field(name: &str) -> Option<(&'static str, &'static str, &'static str)> {
-    let lower = name.to_lowercase();
-
-    // CORE body temperature sensor (check before Stryd — more specific patterns)
-    if (lower.contains("core") && lower.contains("temp"))
-        || (lower.contains("skin") && lower.contains("temp"))
-        || lower.starts_with("ciq_core")
-        || lower.starts_with("ciq_skin")
-        || lower == "core_data_quality"
-        || lower == "core_reserved"
-    {
-        return Some(("core", "CORE", "core_temp"));
-    }
-
-    // Stryd foot pod
-    if lower == "power"
-        || lower == "form power"
-        || lower == "air power"
-        || lower == "ground time"
-        || lower == "leg spring stiffness"
-        || lower == "vertical oscillation"
-        || lower.contains("stryd")
-        || lower == "dragfactor"
-        || lower == "drag factor"
-        || lower == "strokelength"
-        || lower == "stroke length"
-    {
-        return Some(("stryd", "Stryd", "foot_pod"));
-    }
-
-    // Muscle oxygen (Moxy, Humon, Train.Red)
-    if lower.contains("muscle oxygen")
-        || lower == "smo2"
-        || lower.contains("hemoglobin")
-    {
-        return Some(("unknown", "Muscle Oxygen Sensor", "muscle_oxygen"));
-    }
-
-    None
-}
-
 /// Determine the output column name for a developer field.
 /// Returns None if the field would collide with a standard column and gets skipped.
 fn column_for_developer_field(name: &str) -> Option<String> {
@@ -384,32 +454,86 @@ fn column_for_developer_field(name: &str) -> Option<String> {
     }
     let normalized = normalize_field_name(name);
     if is_canonical_column(&normalized) {
-        return None; // Redundant with standard field
+        return None;
     }
     Some(normalized)
 }
 
-/// Classify developer fields into sensors based on individual field names.
+/// Classify developer fields into sensors using CIQ app UUIDs.
 ///
-/// Works across developer_data_index boundaries — a single CIQ app can
-/// report data from multiple physical sensors (e.g. Stryd relaying CORE data).
+/// Primary path: match `developer_data_index` → `application_id` UUID from
+/// DeveloperDataId messages.  This is the authoritative, stable identifier.
+///
+/// Fallback: for files without DeveloperDataId messages (rare), all fields
+/// are grouped under a single "unknown" sensor.
+///
+/// When `include_columns` is true, each sensor's `columns` list is populated
+/// with the output column names that appear in the data.  When false (metadata-
+/// only scan), sensors are classified but columns are left empty.
 fn classify_developer_sensors(
     dev_field_groups: &BTreeMap<u8, Vec<String>>,
+    dev_app_uuids: &BTreeMap<u8, Vec<String>>,
     present_extra_columns: &BTreeSet<String>,
+    include_columns: bool,
 ) -> Vec<DeveloperSensor> {
-    // Classify each field individually, group by sensor.
     let mut sensor_columns: BTreeMap<
         (&str, &str, &str), // (manufacturer, product, sensor_type)
         BTreeSet<String>,
     > = BTreeMap::new();
 
-    for name in dev_field_groups.values().flatten() {
-        if let Some(sensor) = sensor_for_field(name) {
-            if let Some(col) = column_for_developer_field(name) {
-                // Only include columns that actually appear in the output.
-                let exists = present_extra_columns.contains(&col) || is_canonical_column(&col);
-                if exists {
-                    sensor_columns.entry(sensor).or_default().insert(col);
+    // Build a map from developer_data_index → list of known apps.
+    let mut apps_per_idx: BTreeMap<u8, Vec<&KnownCiqApp>> = BTreeMap::new();
+    for (&idx, uuids) in dev_app_uuids {
+        for uuid in uuids {
+            if let Some(app) = lookup_ciq_app(uuid) {
+                apps_per_idx.entry(idx).or_default().push(app);
+            }
+        }
+    }
+
+    // Track which fields have been claimed (by column name) so that
+    // a field belonging to a sensor at its own dedicated index isn't
+    // also grabbed by a catch-all sensor at a shared index.
+    let mut claimed: BTreeSet<String> = BTreeSet::new();
+
+    // Process indices with a single known app first (unambiguous),
+    // then indices with multiple apps (need filtering).
+    let mut idx_order: Vec<u8> = apps_per_idx.keys().copied().collect();
+    idx_order.sort_by_key(|idx| {
+        let n = apps_per_idx.get(idx).map_or(0, |v| v.len());
+        if n == 1 { 0 } else { 1 } // single-app indices first
+    });
+
+    for &dev_idx in &idx_order {
+        let fields = match dev_field_groups.get(&dev_idx) {
+            Some(f) => f,
+            None => continue,
+        };
+        let apps = match apps_per_idx.get(&dev_idx) {
+            Some(a) => a,
+            None => continue,
+        };
+
+        for app in apps {
+            let entry = sensor_columns
+                .entry((app.manufacturer, app.product, app.sensor_type))
+                .or_default();
+            if include_columns {
+                for name in fields {
+                    if !(app.owns_field)(name) {
+                        continue;
+                    }
+                    if let Some(col) = column_for_developer_field(name) {
+                        if claimed.contains(&col) {
+                            continue; // Already owned by another sensor.
+                        }
+                        let exists =
+                            present_extra_columns.contains(&col) || is_canonical_column(&col);
+                        if exists {
+                            entry.insert(col.clone());
+                            claimed.insert(col);
+                        }
+                    }
                 }
             }
         }
@@ -446,6 +570,10 @@ struct RecordRow {
     // but emitted as extras (not part of the 10 standard columns).
     core_temperature: Option<f32>,
     smo2: Option<f32>,
+    // Developer shadow fields — kept separate from standard fields so
+    // we can pick the winner per-session after slicing.
+    dev_power: Option<i16>,
+    dev_cadence: Option<i16>,
 }
 
 #[derive(Default)]
@@ -461,12 +589,16 @@ struct SessionMeta {
     end_timestamp_us: Option<i64>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct DeviceMeta {
     manufacturer: Option<String>,
     product: Option<String>,
     serial_number: Option<String>,
     device_index: Option<u8>,
+    /// ANT+ device type from DeviceInfo (e.g. 11 = bike_power, 120 = heart_rate).
+    ant_device_type: Option<u8>,
+    /// Columns attributed to this device (populated per-session during merge).
+    columns: Vec<String>,
 }
 
 struct ParseResult {
@@ -474,6 +606,8 @@ struct ParseResult {
     extra_col_info: Vec<(String, DataType)>,
     extra_data: Vec<TypedColumn>,
     sessions: Vec<SessionMeta>,
+    /// All DeviceInfo entries, in order of appearance.  Split into per-session
+    /// groups using `split_devices_per_session` before building output.
     devices: Vec<DeviceMeta>,
     developer_sensors: Vec<DeveloperSensor>,
 }
@@ -486,6 +620,7 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
     let mut sessions = Vec::new();
     let mut devices = Vec::new();
     let mut dev_field_groups: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+    let mut dev_app_uuids: BTreeMap<u8, Vec<String>> = BTreeMap::new();
 
     // ── Pass 1: process metadata messages + discover extra columns ────────
     let mut n_rows = 0usize;
@@ -563,11 +698,31 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                                 _ => value_to_f64(field.value()).map(|v| v as u8),
                             }
                         }
+                        "antplus_device_type" => {
+                            device.ant_device_type = value_to_u8(field.value());
+                        }
                         _ => {}
                     }
                 }
                 if device.manufacturer.is_some() || device.product.is_some() {
                     devices.push(device);
+                }
+            }
+            MesgNum::DeveloperDataId => {
+                let mut dev_idx: Option<u8> = None;
+                let mut app_id: Option<String> = None;
+                for field in msg.fields() {
+                    match field.name() {
+                        "developer_data_index" => dev_idx = value_to_u8(field.value()),
+                        "application_id" => app_id = value_to_uuid(field.value()),
+                        _ => {}
+                    }
+                }
+                if let (Some(idx), Some(uuid)) = (dev_idx, app_id) {
+                    let uuids = dev_app_uuids.entry(idx).or_default();
+                    if !uuids.contains(&uuid) {
+                        uuids.push(uuid);
+                    }
                 }
             }
             MesgNum::FieldDescription => {
@@ -610,10 +765,15 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
         .map(|(_, dtype)| TypedColumn::new(dtype, n_rows))
         .collect();
 
-    // Classify developer sensors.
+    // Classify developer sensors (with columns — full parse has data for merge).
     let present_extra_columns: BTreeSet<String> =
         extra_col_info.iter().map(|(name, _)| name.clone()).collect();
-    let developer_sensors = classify_developer_sensors(&dev_field_groups, &present_extra_columns);
+    let developer_sensors = classify_developer_sensors(
+        &dev_field_groups,
+        &dev_app_uuids,
+        &present_extra_columns,
+        true,
+    );
 
     // ── Pass 2: fill record data ──────────────────────────────────────────
     let mut records = Vec::with_capacity(n_rows);
@@ -645,15 +805,17 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                 }
                 "temperature" => row.temperature = value_to_i8(field.value()),
                 "distance" => row.distance = value_to_f64(field.value()),
-                // Developer fields — merge into canonical columns
-                "Power" => merge_i16(&mut row.power, field.value()),
-                "Cadence" => merge_i16(&mut row.cadence, field.value()),
+                // Developer fields — stored separately for per-session merge
+                "Power" => row.dev_power = value_to_i16(field.value()),
+                "Cadence" => row.dev_cadence = value_to_i16(field.value()),
+                // core_temperature and smo2 have no standard-field equivalent,
+                // so they go directly into the canonical slot.
                 "Core Body Temperature" | "core_temperature" => {
-                    merge_f32(&mut row.core_temperature, field.value())
+                    row.core_temperature = value_to_f32(field.value());
                 }
                 "Current Saturated Hemoglobin Percent" | "SmO2" | "smo2"
                 | "saturated_hemoglobin_percent" => {
-                    merge_f32(&mut row.smo2, field.value())
+                    row.smo2 = value_to_f32(field.value());
                 }
                 other => {
                     if let Some(&ci) = raw_to_col.get(other) {
@@ -865,6 +1027,11 @@ fn device_to_dict<'py>(
     dict.set_item("product", device.product.as_deref())?;
     dict.set_item("serial_number", device.serial_number.as_deref())?;
     dict.set_item("device_index", device.device_index)?;
+    let cols = PyList::empty_bound(py);
+    for c in &device.columns {
+        cols.append(c)?;
+    }
+    dict.set_item("columns", cols)?;
     Ok(dict)
 }
 
@@ -914,44 +1081,210 @@ fn build_activity_dict<'py>(
     };
 
     let metrics_list = PyList::empty_bound(py);
-    for m in &metrics {
-        metrics_list.append(m)?;
-    }
+    for m in &metrics { metrics_list.append(m)?; }
     meta.set_item("metrics", metrics_list)?;
 
     let devices_list = PyList::empty_bound(py);
-    for d in devices {
-        devices_list.append(device_to_dict(py, d)?)?;
-    }
+    for d in devices { devices_list.append(device_to_dict(py, d)?)?; }
     meta.set_item("devices", devices_list)?;
 
     let sensors_list = PyList::empty_bound(py);
-    for s in developer_sensors {
-        sensors_list.append(sensor_to_dict(py, s)?)?;
-    }
+    for s in developer_sensors { sensors_list.append(sensor_to_dict(py, s)?)?; }
     meta.set_item("developer_sensors", sensors_list)?;
 
     activity.set_item("metadata", meta)?;
     Ok(activity)
 }
 
-fn build_parse_result_dict(py: Python<'_>, parsed: ParseResult) -> PyResult<PyObject> {
+// ---------------------------------------------------------------------------
+// Per-session merge: resolve standard vs developer for each canonical column
+// ---------------------------------------------------------------------------
+
+/// For a slice of records, determine whether the developer field should replace
+/// the standard field.  Returns true when the developer field has strictly more
+/// non-null non-zero values (majority wins; ties go to the standard field).
+fn developer_wins_i16(
+    records: &[RecordRow],
+    standard: impl Fn(&RecordRow) -> Option<i16>,
+    developer: impl Fn(&RecordRow) -> Option<i16>,
+) -> bool {
+    let std_count = count_nonzero_i16(records, &standard);
+    let dev_count = count_nonzero_i16(records, developer);
+    dev_count > std_count
+}
+
+/// Resolve per-session merges and copy winners into canonical RecordRow fields.
+/// Returns a bitmask: bit 0 = developer won power, bit 1 = developer won cadence.
+fn resolve_merge(records: &mut [RecordRow]) -> u8 {
+    let mut dev_won: u8 = 0;
+
+    // Power: standard power vs developer Power (Stryd)
+    let has_dev_power = records.iter().any(|r| r.dev_power.is_some());
+    if has_dev_power {
+        if developer_wins_i16(records, |r| r.power, |r| r.dev_power) {
+            dev_won |= 1;
+            for row in records.iter_mut() {
+                row.power = row.dev_power;
+            }
+        }
+    }
+
+    // Cadence: standard cadence vs developer Cadence (Stryd)
+    let has_dev_cadence = records.iter().any(|r| r.dev_cadence.is_some());
+    if has_dev_cadence {
+        if developer_wins_i16(records, |r| r.cadence, |r| r.dev_cadence) {
+            dev_won |= 2;
+            for row in records.iter_mut() {
+                row.cadence = row.dev_cadence;
+            }
+        }
+    }
+
+    dev_won
+}
+
+/// Find the hardware device that matches an ANT+ device type.
+fn find_device_by_ant_type(devices: &[DeviceMeta], ant_types: &[u8]) -> Option<usize> {
+    devices
+        .iter()
+        .position(|d| d.ant_device_type.is_some_and(|t| ant_types.contains(&t)))
+}
+
+/// Find a hardware device whose manufacturer is known to produce this metric.
+/// Skips the creator device (device_index == 0) since that's the watch itself.
+/// When multiple devices match, prefer the one with the highest device_index —
+/// in multi-session files the watch re-emits all known devices, and the one
+/// added most recently (highest index) is most likely the active source.
+fn find_device_by_manufacturer(devices: &[DeviceMeta], manufacturers: &[&str]) -> Option<usize> {
+    devices
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| {
+            d.device_index != Some(0)
+                && d.manufacturer
+                    .as_deref()
+                    .is_some_and(|m| manufacturers.contains(&m))
+        })
+        .max_by_key(|(_, d)| d.device_index.unwrap_or(0))
+        .map(|(i, _)| i)
+}
+
+/// Find the creator device (device_index == 0).
+fn find_creator_device(devices: &[DeviceMeta]) -> Option<usize> {
+    devices.iter().position(|d| d.device_index == Some(0))
+}
+
+/// Build per-session device list with column attribution based on merge outcome.
+fn attribute_devices(
+    base_devices: &[DeviceMeta],
+    developer_sensors: &[DeveloperSensor],
+    dev_won: u8,
+) -> (Vec<DeviceMeta>, Vec<DeveloperSensor>) {
+    let mut devices: Vec<DeviceMeta> = base_devices.to_vec();
+    let mut sensors: Vec<DeveloperSensor> = developer_sensors.to_vec();
+
+    for (bit, col) in MERGEABLE_COLUMNS.iter().enumerate() {
+        let dev_won_this = dev_won & (1 << bit) != 0;
+        if dev_won_this {
+            // Developer sensor won — it already has this column from
+            // classify_developer_sensors, nothing to do.
+        } else {
+            // Standard field won (or no developer field existed) — remove
+            // column from developer sensors and attribute to hardware device.
+            for sensor in &mut sensors {
+                sensor.columns.retain(|c| c != col.name);
+            }
+            // Three-tier fallback: ANT+ device type → known manufacturer → creator.
+            let device_idx = find_device_by_ant_type(&devices, col.ant_device_types)
+                .or_else(|| find_device_by_manufacturer(&devices, col.known_manufacturers))
+                .or_else(|| find_creator_device(&devices));
+            if let Some(idx) = device_idx {
+                if !devices[idx].columns.contains(&col.name.to_string()) {
+                    devices[idx].columns.push(col.name.to_string());
+                }
+            }
+        }
+    }
+
+    // Remove sensors with no remaining columns.
+    sensors.retain(|s| !s.columns.is_empty());
+
+    (devices, sensors)
+}
+
+/// Split a flat list of DeviceInfo entries into per-session groups.
+///
+/// FIT files re-emit DeviceInfo messages for each session.  Each batch starts
+/// with `device_index == 0` (the creator).  We split on those boundaries and
+/// deduplicate within each group.  If there are more groups than sessions, we
+/// merge the extras into the last group (Garmin sometimes emits a cleanup batch
+/// at the end).  If there are fewer groups, we reuse the single group for all.
+fn split_devices_per_session(
+    all_devices: &[DeviceMeta],
+    n_sessions: usize,
+) -> Vec<Vec<DeviceMeta>> {
+    if n_sessions == 0 {
+        return vec![all_devices.to_vec()];
+    }
+
+    // Split into groups at each device_index==0 boundary.
+    let mut groups: Vec<Vec<DeviceMeta>> = Vec::new();
+    for device in all_devices {
+        if device.device_index == Some(0) && !groups.is_empty() {
+            groups.push(Vec::new());
+        }
+        if groups.is_empty() {
+            groups.push(Vec::new());
+        }
+        groups.last_mut().unwrap().push(device.clone());
+    }
+
+    if groups.len() <= n_sessions {
+        // Fewer groups than sessions (or equal) — use what we have, padding
+        // with the full list for any unmatched sessions.
+        let mut result = groups;
+        while result.len() < n_sessions {
+            result.push(all_devices.to_vec());
+        }
+        result
+    } else {
+        // More groups than sessions — take the first n_sessions groups and
+        // merge any remaining devices into the last group.
+        let mut result: Vec<Vec<DeviceMeta>> = groups[..n_sessions].to_vec();
+        for extra_group in &groups[n_sessions..] {
+            result.last_mut().unwrap().extend(extra_group.iter().cloned());
+        }
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<PyObject> {
     let result = PyDict::new_bound(py);
     let activities = PyList::empty_bound(py);
 
-    let batch = build_batch(&parsed.records, &parsed.extra_col_info, &parsed.extra_data)?;
-
     if parsed.sessions.len() <= 1 {
-        let session = parsed.sessions.first();
+        // Single session (or no sessions): merge across all records.
+        let dev_won = resolve_merge(&mut parsed.records);
+        let batch = build_batch(&parsed.records, &parsed.extra_col_info, &parsed.extra_data)?;
+        let (devices, sensors) =
+            attribute_devices(&parsed.devices, &parsed.developer_sensors, dev_won);
+
         activities.append(build_activity_dict(
             py,
             &batch,
-            session,
-            &parsed.devices,
-            &parsed.developer_sensors,
+            parsed.sessions.first(),
+            &devices,
+            &sensors,
         )?)?;
     } else {
-        for session in &parsed.sessions {
+        // Multi-session: slice records per session, merge each independently.
+        let batch = build_batch(&parsed.records, &parsed.extra_col_info, &parsed.extra_data)?;
+        let device_groups =
+            split_devices_per_session(&parsed.devices, parsed.sessions.len());
+
+        for (si, session) in parsed.sessions.iter().enumerate() {
             let start = session.start_timestamp_us.unwrap_or(i64::MIN);
             let end = session.end_timestamp_us.unwrap_or(i64::MAX);
             let first = parsed
@@ -965,19 +1298,70 @@ fn build_parse_result_dict(py: Python<'_>, parsed: ParseResult) -> PyResult<PyOb
                 .rposition(|r| r.timestamp.unwrap_or(0) <= end)
                 .map(|i| i + 1)
                 .unwrap_or(first);
-            let sliced = batch.slice(first, last.saturating_sub(first));
+            let len = last.saturating_sub(first);
+
+            // Resolve merge on a mutable slice of this session's records.
+            let session_records = &mut parsed.records[first..first + len];
+            let dev_won = resolve_merge(session_records);
+
+            // Rebuild fixed columns (+ canonical extras) from the now-resolved
+            // records.  Dynamic extras come from the pre-built batch via slice.
+            let session_batch = build_batch(session_records, &[], &[])?;
+            let full_batch = merge_fixed_with_extras(&session_batch, &batch.slice(first, len))?;
+
+            let (devices, sensors) =
+                attribute_devices(&device_groups[si], &parsed.developer_sensors, dev_won);
+
             activities.append(build_activity_dict(
                 py,
-                &sliced,
+                &full_batch,
                 Some(session),
-                &parsed.devices,
-                &parsed.developer_sensors,
+                &devices,
+                &sensors,
             )?)?;
         }
     }
 
     result.set_item("activities", activities)?;
     Ok(result.into_any().unbind())
+}
+
+/// Combine fixed columns (0..10) from `fixed_source` with extra columns (10+)
+/// from `extras_source` into a single RecordBatch.
+fn merge_fixed_with_extras(
+    fixed_source: &RecordBatch,
+    extras_source: &RecordBatch,
+) -> PyResult<RecordBatch> {
+    let n_fixed = 10;
+    let mut fields: Vec<Field> = Vec::new();
+    let mut arrays: Vec<Arc<dyn arrow::array::Array>> = Vec::new();
+
+    // Fixed columns from the resolved session batch.
+    for i in 0..n_fixed.min(fixed_source.num_columns()) {
+        fields.push(fixed_source.schema().field(i).clone());
+        arrays.push(fixed_source.column(i).clone());
+    }
+    // Extra columns from the original sliced batch.
+    for i in n_fixed..extras_source.num_columns() {
+        fields.push(extras_source.schema().field(i).clone());
+        arrays.push(extras_source.column(i).clone());
+    }
+
+    // Also include canonical extras (core_temperature, smo2) from fixed_source
+    // if they exist there (indices 10+).
+    let fixed_schema = fixed_source.schema();
+    for i in n_fixed..fixed_source.num_columns() {
+        let name = fixed_schema.field(i).name();
+        // Only add if not already present from extras_source.
+        if !fields.iter().any(|f| f.name() == name) {
+            fields.push(fixed_schema.field(i).clone());
+            arrays.push(fixed_source.column(i).clone());
+        }
+    }
+
+    let schema = Schema::new(fields);
+    RecordBatch::try_new(Arc::new(schema), arrays)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 
@@ -993,6 +1377,7 @@ const MESG_RECORD: u16 = 20;
 const MESG_DEVICE_INFO: u16 = 23;
 const MESG_ACTIVITY: u16 = 34;
 const MESG_FIELD_DESCRIPTION: u16 = 206;
+const MESG_DEVELOPER_DATA_ID: u16 = 207;
 
 const SESSION_START_TIME: u8 = 2;
 const SESSION_SPORT: u8 = 5;
@@ -1004,6 +1389,7 @@ const SESSION_TIMESTAMP: u8 = 253;
 const ACTIVITY_LOCAL_TIMESTAMP: u8 = 5;
 
 const DEVICE_INDEX: u8 = 0;
+const DEVICE_TYPE: u8 = 1;
 const DEVICE_MANUFACTURER: u8 = 2;
 const DEVICE_SERIAL_NUMBER: u8 = 3;
 const DEVICE_PRODUCT_NAME: u8 = 27;
@@ -1105,6 +1491,7 @@ impl<'a> FitScanner<'a> {
         let mut result = ScanResult::default();
         let mut metric_set = std::collections::HashSet::new();
         let mut dev_field_groups: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+        let mut dev_app_uuids: BTreeMap<u8, Vec<String>> = BTreeMap::new();
 
         while self.pos < self.end {
             let header = self.read_byte()?;
@@ -1150,6 +1537,16 @@ impl<'a> FitScanner<'a> {
                                 result.devices.push(d);
                             }
                         }
+                        MESG_DEVELOPER_DATA_ID => {
+                            if let Some((idx, uuid)) =
+                                Self::decode_developer_data_id(&fields)
+                            {
+                                let uuids = dev_app_uuids.entry(idx).or_default();
+                                if !uuids.contains(&uuid) {
+                                    uuids.push(uuid);
+                                }
+                            }
+                        }
                         MESG_FIELD_DESCRIPTION => {
                             if let Some(metric) = Self::decode_developer_metric(&fields) {
                                 metric_set.insert(metric);
@@ -1171,14 +1568,16 @@ impl<'a> FitScanner<'a> {
         }
 
         result.record_metrics = metric_set.into_iter().collect();
-        // Scanner doesn't parse records, so we use the developer field names
-        // themselves as "present columns" for sensor classification.
-        let dev_columns: BTreeSet<String> = dev_field_groups
-            .values()
-            .flatten()
-            .filter_map(|n| column_for_developer_field(n))
-            .collect();
-        result.developer_sensors = classify_developer_sensors(&dev_field_groups, &dev_columns);
+        // Scanner classifies sensors for device detection, but does NOT
+        // populate columns — column attribution requires actual record data
+        // (per-session merge).  Sensors are returned with empty column lists.
+        let empty = BTreeSet::new();
+        result.developer_sensors = classify_developer_sensors(
+            &dev_field_groups,
+            &dev_app_uuids,
+            &empty,
+            false,
+        );
 
         if let Some(lt) = result.local_timestamp {
             for s in &mut result.sessions {
@@ -1338,6 +1737,20 @@ impl<'a> FitScanner<'a> {
         None
     }
 
+    /// Extract (developer_data_index, application_id UUID) from a DeveloperDataId message.
+    fn decode_developer_data_id(fields: &[(u8, Vec<u8>)]) -> Option<(u8, String)> {
+        let mut dev_idx: Option<u8> = None;
+        let mut app_id: Option<String> = None;
+        for (num, data) in fields {
+            match *num {
+                1 if data.len() >= 16 => app_id = bytes_to_uuid(data), // application_id
+                3 => dev_idx = data.first().copied(),                   // developer_data_index
+                _ => {}
+            }
+        }
+        dev_idx.zip(app_id)
+    }
+
     fn decode_developer_metric(fields: &[(u8, Vec<u8>)]) -> Option<String> {
         // FieldDescription field 3 is the developer field name (string).
         for (num, data) in fields {
@@ -1381,6 +1794,9 @@ impl<'a> FitScanner<'a> {
             match *num {
                 DEVICE_INDEX if !data.is_empty() && data[0] != 0xFF => {
                     d.device_index = Some(data[0]);
+                }
+                DEVICE_TYPE if !data.is_empty() && data[0] != 0xFF => {
+                    d.ant_device_type = Some(data[0]);
                 }
                 DEVICE_MANUFACTURER if data.len() >= 2 => {
                     let v = read_u16(data, big_endian);

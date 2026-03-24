@@ -147,19 +147,24 @@ def _merge_devices(
     """Merge DeviceInfo devices with developer-field-detected sensors.
 
     If a developer sensor matches a hardware device by manufacturer,
-    enrich the hardware device with sensor_type and columns.
-    Unmatched developer sensors are added as device_type="developer".
+    enrich the hardware device with sensor_type.  Column attribution
+    comes from Rust (per-session merge), so we combine column lists
+    from both sources.  Unmatched developer sensors are appended.
     """
     merged = list(hw_devices)
-    matched_manufacturers: set[str] = set()
 
     for sensor in dev_sensors:
         found = False
         for device in merged:
             if device.manufacturer and device.manufacturer == sensor.manufacturer:
                 device.sensor_type = sensor.sensor_type
-                device.columns = sensor.columns
-                matched_manufacturers.add(sensor.manufacturer)
+                # Merge columns from both sources (Rust attributes standard-
+                # field columns to hw devices, developer columns to sensors).
+                combined = list(device.columns)
+                for col in sensor.columns:
+                    if col not in combined:
+                        combined.append(col)
+                device.columns = combined
                 found = True
                 break
         if not found:
@@ -180,6 +185,7 @@ def _build_device(raw: dict) -> Device:
         product=product,
         serial_number=raw.get("serial_number"),
         device_type="creator" if is_creator else "sensor",
+        columns=list(raw.get("columns", [])),
     )
 
 
@@ -194,5 +200,5 @@ def _build_developer_sensor(raw: dict) -> Device:
         product=product,
         device_type="developer",
         sensor_type=raw.get("sensor_type"),
-        columns=raw.get("columns", []),
+        columns=list(raw.get("columns", [])),
     )
