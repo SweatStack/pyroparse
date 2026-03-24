@@ -32,6 +32,14 @@
     pre { background: #f9f9f9; border: 1px solid #ddd; padding: .75rem; padding-top: 2rem; overflow-x: auto; font-size: 14px; white-space: pre; margin: 0; }
     .copy-btn { position: absolute; top: .4rem; right: .4rem; font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: .2rem .5rem; background: #eee; border: 1px solid #ccc; cursor: pointer; }
     .copy-btn:hover { background: #ddd; }
+    .label-row { display: flex; align-items: center; gap: .3rem; }
+    .info-icon { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; border: 1px solid #999; font-size: 11px; color: #666; cursor: help; position: relative; flex-shrink: 0; }
+    .info-icon .tooltip { display: none; position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); background: #222; color: #fff; padding: .5rem .7rem; font-size: 12px; white-space: nowrap; z-index: 10; pointer-events: none; }
+    .info-icon:hover .tooltip { display: block; }
+    .column-picker { display: none; border: 1px solid #ddd; padding: .5rem; background: #fafafa; }
+    .column-picker.visible { display: block; }
+    .column-picker label { display: inline-block; margin-right: .7rem; cursor: pointer; font-size: 13px; }
+    .column-picker input[type=checkbox] { margin-right: .2rem; vertical-align: middle; }
   </style>
 </head>
 <body>
@@ -48,11 +56,17 @@
     <form action="/convert" method="post" enctype="multipart/form-data">
       <label for="file">.fit file</label>
       <input type="file" id="file" name="file" accept=".fit" required>
-      <label for="columns">columns</label>
+      <div class="label-row">
+        <label for="columns">columns</label>
+        <span class="info-icon">?<span class="tooltip">Standard: timestamp, heart_rate, power,<br>cadence, speed, latitude, longitude,<br>altitude, temperature, distance</span></span>
+      </div>
       <select id="columns" name="columns">
         <option value="standard">Standard columns</option>
-        <option value="all">All columns (incl. extras)</option>
+        <option value="all">All columns (incl. developer fields)</option>
+        <option value="custom">Select columns...</option>
       </select>
+      <div id="column-picker" class="column-picker"></div>
+      <input type="hidden" id="columns-hidden" name="columns_list" value="">
       <label for="format">output format</label>
       <select id="format" name="format">
         <option value="parquet">parquet</option>
@@ -84,10 +98,44 @@
     var base = window.location.origin;
     var formatEl = document.getElementById("format");
     var columnsEl = document.getElementById("columns");
+    var pickerEl = document.getElementById("column-picker");
+    var standardCols = [
+      "timestamp", "heart_rate", "power", "cadence", "speed",
+      "latitude", "longitude", "altitude", "temperature", "distance"
+    ];
+
+    // Build column picker checkboxes
+    standardCols.forEach(function(col) {
+      var label = document.createElement("label");
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = col;
+      cb.checked = true;
+      cb.addEventListener("change", updateExamples);
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(col));
+      pickerEl.appendChild(label);
+    });
+
+    function getColumnsValue() {
+      var mode = columnsEl.value;
+      if (mode === "custom") {
+        var checked = [];
+        pickerEl.querySelectorAll("input:checked").forEach(function(cb) {
+          checked.push(cb.value);
+        });
+        return checked.join(",");
+      }
+      return mode;
+    }
+
+    function updatePicker() {
+      pickerEl.classList.toggle("visible", columnsEl.value === "custom");
+    }
 
     function updateExamples() {
       var fmt = formatEl.value;
-      var cols = columnsEl.value;
+      var cols = getColumnsValue();
       var ext = fmt === "csv" ? "csv" : "parquet";
 
       document.getElementById("ex-curl").textContent = [
@@ -128,9 +176,25 @@
       ].join("\n");
     }
 
+    columnsEl.addEventListener("change", function() {
+      updatePicker();
+      updateExamples();
+    });
     formatEl.addEventListener("change", updateExamples);
-    columnsEl.addEventListener("change", updateExamples);
+    updatePicker();
     updateExamples();
+
+    // On form submit, override the columns value with the resolved list
+    document.querySelector("form").addEventListener("submit", function() {
+      if (columnsEl.value === "custom") {
+        columnsEl.name = "";  // don't send the select
+        document.getElementById("columns-hidden").name = "columns";
+        document.getElementById("columns-hidden").value = getColumnsValue();
+      } else {
+        columnsEl.name = "columns";
+        document.getElementById("columns-hidden").name = "";
+      }
+    });
 
     document.querySelectorAll(".copy-btn").forEach(function(btn) {
       btn.addEventListener("click", function() {
