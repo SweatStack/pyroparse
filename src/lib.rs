@@ -139,6 +139,32 @@ fn value_to_u8(val: &Value) -> Option<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Canonical merge helpers — developer field values enrich standard fields
+// ---------------------------------------------------------------------------
+
+/// Merge a developer i16 value into a canonical column.
+///
+/// Developer value wins when the canonical value is absent or zero.
+/// This handles multi-sport files where a standard field carries a
+/// placeholder 0 for sports that don't use that sensor.
+fn merge_i16(canonical: &mut Option<i16>, val: &Value) {
+    if canonical.unwrap_or(0) == 0 {
+        if let Some(v) = value_to_i16(val) {
+            *canonical = Some(v);
+        }
+    }
+}
+
+/// Merge a developer f32 value into a canonical column.
+fn merge_f32(canonical: &mut Option<f32>, val: &Value) {
+    if canonical.unwrap_or(0.0) == 0.0 {
+        if let Some(v) = value_to_f32(val) {
+            *canonical = Some(v);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Column-oriented storage for extra (non-fixed) FIT fields
 // ---------------------------------------------------------------------------
 
@@ -234,8 +260,9 @@ fn normalize_field_name(name: &str) -> String {
     result
 }
 
-/// The 12 fixed columns — these are never added to extras.
-fn is_fixed_column(name: &str) -> bool {
+/// The 10 standard columns + 2 canonical extras — none of these are added to
+/// the dynamic extras discovered from the file.
+fn is_canonical_column(name: &str) -> bool {
     matches!(
         name,
         "timestamp"
@@ -243,8 +270,8 @@ fn is_fixed_column(name: &str) -> bool {
             | "power"
             | "cadence"
             | "speed"
-            | "position_lat"
-            | "position_long"
+            | "latitude"
+            | "longitude"
             | "altitude"
             | "temperature"
             | "distance"
@@ -258,6 +285,7 @@ fn is_fixed_column(name: &str) -> bool {
 fn is_handled_field(name: &str) -> bool {
     matches!(
         name,
+        // Standard fields
         "timestamp"
             | "heart_rate"
             | "power"
@@ -270,7 +298,9 @@ fn is_handled_field(name: &str) -> bool {
             | "enhanced_altitude"
             | "temperature"
             | "distance"
+            // Developer fields merged into canonical columns
             | "Power"
+            | "Cadence"
             | "Core Body Temperature"
             | "core_temperature"
             | "Current Saturated Hemoglobin Percent"
@@ -353,7 +383,7 @@ fn column_for_developer_field(name: &str) -> Option<String> {
         return Some(norm.to_string());
     }
     let normalized = normalize_field_name(name);
-    if is_fixed_column(&normalized) {
+    if is_canonical_column(&normalized) {
         return None; // Redundant with standard field
     }
     Some(normalized)
@@ -377,7 +407,7 @@ fn classify_developer_sensors(
         if let Some(sensor) = sensor_for_field(name) {
             if let Some(col) = column_for_developer_field(name) {
                 // Only include columns that actually appear in the output.
-                let exists = present_extra_columns.contains(&col) || is_fixed_column(&col);
+                let exists = present_extra_columns.contains(&col) || is_canonical_column(&col);
                 if exists {
                     sensor_columns.entry(sensor).or_default().insert(col);
                 }
@@ -407,11 +437,13 @@ struct RecordRow {
     power: Option<i16>,
     cadence: Option<i16>,
     speed: Option<f32>,
-    position_lat: Option<f64>,
-    position_long: Option<f64>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
     altitude: Option<f32>,
     temperature: Option<i8>,
     distance: Option<f64>,
+    // Canonical columns kept in struct for developer field merge,
+    // but emitted as extras (not part of the 10 standard columns).
     core_temperature: Option<f32>,
     smo2: Option<f32>,
 }
@@ -474,7 +506,7 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                     // Normalize once per unique raw name.
                     if !raw_to_normalized.contains_key(raw) {
                         let n = normalize_field_name(raw);
-                        let val = if is_fixed_column(&n) { None } else { Some(n) };
+                        let val = if is_canonical_column(&n) { None } else { Some(n) };
                         raw_to_normalized.insert(raw.to_string(), val);
                     }
                     let Some(normalized) = raw_to_normalized.get(raw).unwrap().as_ref() else {
@@ -594,17 +626,18 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
         let mut row = RecordRow::default();
         for field in msg.fields() {
             match field.name() {
+                // Standard fields — set directly
                 "timestamp" => row.timestamp = value_to_timestamp_us(field.value()),
                 "heart_rate" => row.heart_rate = value_to_i16(field.value()),
                 "power" => row.power = value_to_i16(field.value()),
                 "speed" | "enhanced_speed" => row.speed = value_to_f32(field.value()),
                 "cadence" => row.cadence = value_to_i16(field.value()),
                 "position_lat" => {
-                    row.position_lat =
+                    row.latitude =
                         value_to_f64(field.value()).map(|v| v * SEMICIRCLE_TO_DEGREES)
                 }
                 "position_long" => {
-                    row.position_long =
+                    row.longitude =
                         value_to_f64(field.value()).map(|v| v * SEMICIRCLE_TO_DEGREES)
                 }
                 "altitude" | "enhanced_altitude" => {
@@ -612,15 +645,15 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                 }
                 "temperature" => row.temperature = value_to_i8(field.value()),
                 "distance" => row.distance = value_to_f64(field.value()),
-                "Power" if row.power.is_none() => {
-                    row.power = value_to_i16(field.value())
-                }
+                // Developer fields — merge into canonical columns
+                "Power" => merge_i16(&mut row.power, field.value()),
+                "Cadence" => merge_i16(&mut row.cadence, field.value()),
                 "Core Body Temperature" | "core_temperature" => {
-                    row.core_temperature = value_to_f32(field.value())
+                    merge_f32(&mut row.core_temperature, field.value())
                 }
                 "Current Saturated Hemoglobin Percent" | "SmO2" | "smo2"
                 | "saturated_hemoglobin_percent" => {
-                    row.smo2 = value_to_f32(field.value())
+                    merge_f32(&mut row.smo2, field.value())
                 }
                 other => {
                     if let Some(&ci) = raw_to_col.get(other) {
@@ -682,6 +715,25 @@ fn build_batch(
     extra_data: &[TypedColumn],
 ) -> PyResult<RecordBatch> {
     // Schema: 12 fixed columns, then extras alphabetically.
+    // Canonical extras from RecordRow (core_temperature, smo2) — only include
+    // if they have at least one non-null value, sorted into the extras.
+    let mut canonical_extras: Vec<(String, Arc<dyn arrow::array::Array>)> = Vec::new();
+    if records.iter().any(|r| r.core_temperature.is_some()) {
+        canonical_extras.push((
+            "core_temperature".into(),
+            Arc::new(Float32Array::from_iter(
+                records.iter().map(|r| r.core_temperature),
+            )),
+        ));
+    }
+    if records.iter().any(|r| r.smo2.is_some()) {
+        canonical_extras.push((
+            "smo2".into(),
+            Arc::new(Float32Array::from_iter(records.iter().map(|r| r.smo2))),
+        ));
+    }
+
+    // Schema: 10 standard columns, then all extras sorted alphabetically.
     let mut fields = vec![
         Field::new(
             "timestamp",
@@ -692,15 +744,25 @@ fn build_batch(
         Field::new("power", DataType::Int16, true),
         Field::new("cadence", DataType::Int16, true),
         Field::new("speed", DataType::Float32, true),
-        Field::new("position_lat", DataType::Float64, true),
-        Field::new("position_long", DataType::Float64, true),
+        Field::new("latitude", DataType::Float64, true),
+        Field::new("longitude", DataType::Float64, true),
         Field::new("altitude", DataType::Float32, true),
         Field::new("temperature", DataType::Int8, true),
         Field::new("distance", DataType::Float64, true),
-        Field::new("core_temperature", DataType::Float32, true),
-        Field::new("smo2", DataType::Float32, true),
     ];
+
+    // Merge canonical extras and dynamic extras into one sorted list.
+    let mut all_extras: Vec<(&str, &DataType, Option<&Arc<dyn arrow::array::Array>>)> = Vec::new();
+    for (name, arr) in &canonical_extras {
+        let dt = arr.data_type();
+        all_extras.push((name.as_str(), dt, Some(arr)));
+    }
     for (name, dtype) in extra_col_info {
+        all_extras.push((name.as_str(), dtype, None));
+    }
+    all_extras.sort_by_key(|(name, _, _)| *name);
+
+    for &(name, dtype, _) in &all_extras {
         fields.push(Field::new(name, dtype.clone(), true));
     }
     let schema = Schema::new(fields);
@@ -716,24 +778,24 @@ fn build_batch(
         Arc::new(Int16Array::from_iter(records.iter().map(|r| r.power))),
         Arc::new(Int16Array::from_iter(records.iter().map(|r| r.cadence))),
         Arc::new(Float32Array::from_iter(records.iter().map(|r| r.speed))),
+        Arc::new(Float64Array::from_iter(records.iter().map(|r| r.latitude))),
         Arc::new(Float64Array::from_iter(
-            records.iter().map(|r| r.position_lat),
-        )),
-        Arc::new(Float64Array::from_iter(
-            records.iter().map(|r| r.position_long),
+            records.iter().map(|r| r.longitude),
         )),
         Arc::new(Float32Array::from_iter(records.iter().map(|r| r.altitude))),
         Arc::new(Int8Array::from_iter(
             records.iter().map(|r| r.temperature),
         )),
         Arc::new(Float64Array::from_iter(records.iter().map(|r| r.distance))),
-        Arc::new(Float32Array::from_iter(
-            records.iter().map(|r| r.core_temperature),
-        )),
-        Arc::new(Float32Array::from_iter(records.iter().map(|r| r.smo2))),
     ];
-    for col in extra_data {
-        arrays.push(col.to_arrow_array());
+    let mut extra_data_idx = 0;
+    for &(_, _, canonical_arr) in &all_extras {
+        if let Some(arr) = canonical_arr {
+            arrays.push(arr.clone());
+        } else {
+            arrays.push(extra_data[extra_data_idx].to_arrow_array());
+            extra_data_idx += 1;
+        }
     }
 
     RecordBatch::try_new(Arc::new(schema), arrays)
@@ -752,8 +814,8 @@ fn detect_metrics(batch: &RecordBatch) -> Vec<String> {
     let mut metrics = Vec::new();
     let has_data = |i: usize| batch.column(i).null_count() < n;
 
-    // Fixed columns: 0=timestamp 1=hr 2=power 3=cadence 4=speed
-    //   5=lat 6=long 7=alt 8=temp 9=dist 10=core_temp 11=smo2
+    // Standard columns: 0=timestamp 1=hr 2=power 3=cadence 4=speed
+    //   5=latitude 6=longitude 7=altitude 8=temperature 9=distance
     if has_data(1) { metrics.push("heart_rate".into()); }
     if has_data(2) { metrics.push("power".into()); }
     if has_data(4) { metrics.push("speed".into()); }
@@ -762,12 +824,11 @@ fn detect_metrics(batch: &RecordBatch) -> Vec<String> {
     if has_data(7) { metrics.push("altitude".into()); }
     if has_data(8) { metrics.push("temperature".into()); }
     if has_data(9) { metrics.push("distance".into()); }
-    if has_data(10) { metrics.push("core_temperature".into()); }
-    if has_data(11) { metrics.push("smo2".into()); }
 
-    // Extra columns (indices 12+).
+    // Extra columns (indices 10+), includes canonical extras like
+    // core_temperature and smo2 alongside dynamic extras.
     let schema = batch.schema();
-    for i in 12..batch.num_columns() {
+    for i in 10..batch.num_columns() {
         if has_data(i) {
             metrics.push(schema.field(i).name().clone());
         }
@@ -1097,7 +1158,7 @@ impl<'a> FitScanner<'a> {
                                 Self::decode_developer_field_info(&fields)
                             {
                                 let normalized = normalize_field_name(&name);
-                                if !is_fixed_column(&normalized) {
+                                if !is_canonical_column(&normalized) {
                                     metric_set.insert(normalized);
                                 }
                                 dev_field_groups.entry(idx).or_default().push(name);

@@ -5,28 +5,13 @@ from pyroparse import Activity, ActivityMetadata, Device
 
 
 EXPECTED_ROWS = 21_666
-FIXED_COLUMNS = {
-    "timestamp",
-    "heart_rate",
-    "power",
-    "speed",
-    "cadence",
-    "position_lat",
-    "position_long",
-    "altitude",
-    "temperature",
-    "distance",
-    "core_temperature",
-    "smo2",
-}
-
 EXPECTED_STATS = {
     "heart_rate": (21_103, 130.87),
     "power": (19_775, 154.94),
     "speed": (21_136, 5.68),
     "cadence": (16_697, 71.76),
-    "position_lat": (21_129, 61.41),
-    "position_long": (21_129, 5.44),
+    "latitude": (21_129, 61.41),
+    "longitude": (21_129, 5.44),
 }
 
 
@@ -48,8 +33,9 @@ class TestLoadFit:
         assert activity.data.num_rows == EXPECTED_ROWS
 
     def test_columns(self, fit_path):
+        from pyroparse._schema import STANDARD_COLUMNS
         activity = Activity.load_fit(fit_path)
-        assert set(activity.data.column_names) >= FIXED_COLUMNS
+        assert activity.data.column_names == STANDARD_COLUMNS
 
     def test_schema_types(self, fit_path):
         schema = Activity.load_fit(fit_path).data.schema
@@ -58,8 +44,8 @@ class TestLoadFit:
         assert schema.field("power").type == pa.int16()
         assert schema.field("cadence").type == pa.int16()
         assert schema.field("speed").type == pa.float32()
-        assert schema.field("position_lat").type == pa.float64()
-        assert schema.field("position_long").type == pa.float64()
+        assert schema.field("latitude").type == pa.float64()
+        assert schema.field("longitude").type == pa.float64()
 
     def test_timestamp_not_nullable(self, fit_path):
         activity = Activity.load_fit(fit_path)

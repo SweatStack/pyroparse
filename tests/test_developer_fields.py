@@ -21,7 +21,8 @@ class TestDeveloperFields:
         assert non_null > 2000, f"Expected Stryd power data, got {non_null} non-null"
 
     def test_core_temperature_extracted(self, dev_fields_path):
-        col = Activity.load_fit(dev_fields_path).data.column("core_temperature")
+        data = Activity.load_fit(dev_fields_path, extra_columns=["core_temperature"]).data
+        col = data.column("core_temperature")
         non_null = col.length() - col.null_count
         assert non_null > 0, "Expected CORE temperature data"
 
@@ -47,7 +48,7 @@ class TestDeveloperFields:
         assert "moxy" in names
 
     def test_schema_has_all_columns(self, dev_fields_path):
-        schema = Activity.load_fit(dev_fields_path).data.schema
+        schema = Activity.load_fit(dev_fields_path, columns="all").data.schema
         assert schema.field("core_temperature").type == pa.float32()
         assert schema.field("smo2").type == pa.float32()
         assert schema.field("altitude").type == pa.float32()

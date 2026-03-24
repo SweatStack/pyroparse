@@ -24,11 +24,17 @@ class TestDefault:
         pq_cols = pp.Activity.load_parquet(parquet_path).data.column_names
         assert fit_cols == pq_cols == STANDARD_COLUMNS
 
-    def test_includes_all_null_columns(self, fit_path):
-        """Standard columns are always present, even if all-null."""
+    def test_does_not_include_niche_columns(self, fit_path):
+        """core_temperature and smo2 are extras, not standard."""
         data = pp.read_fit(fit_path)
-        assert "smo2" in data.column_names
+        assert "core_temperature" not in data.column_names
+        assert "smo2" not in data.column_names
+
+    def test_niche_columns_available_via_all(self, dev_fields_path):
+        """core_temperature and smo2 available via columns='all'."""
+        data = pp.read_fit(dev_fields_path, columns="all")
         assert "core_temperature" in data.column_names
+        assert "smo2" in data.column_names
 
 
 class TestColumnsAll:
@@ -149,8 +155,8 @@ class TestConstant:
     def test_is_list(self):
         assert isinstance(pp.STANDARD_COLUMNS, list)
 
-    def test_has_12_columns(self):
-        assert len(pp.STANDARD_COLUMNS) == 12
+    def test_has_10_columns(self):
+        assert len(pp.STANDARD_COLUMNS) == 10
 
     def test_timestamp_first(self):
         assert pp.STANDARD_COLUMNS[0] == "timestamp"

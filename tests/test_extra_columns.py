@@ -14,11 +14,11 @@ class TestExtraColumns:
 
     def test_standard_columns_come_first(self, dev_fields_path):
         names = Activity.load_fit(dev_fields_path, columns="all").data.column_names
-        assert names[:12] == STANDARD_COLUMNS
+        assert names[:len(STANDARD_COLUMNS)] == STANDARD_COLUMNS
 
     def test_extra_columns_sorted_alphabetically(self, dev_fields_path):
         names = Activity.load_fit(dev_fields_path, columns="all").data.column_names
-        extras = names[12:]
+        extras = names[len(STANDARD_COLUMNS):]
         assert extras == sorted(extras)
 
     def test_running_dynamics_present(self, dev_fields_path):
@@ -66,7 +66,7 @@ class TestExtraColumns:
         assert schema.field("heart_rate").type == pa.int16()
         assert schema.field("power").type == pa.int16()
         assert schema.field("speed").type == pa.float32()
-        assert schema.field("position_lat").type == pa.float64()
+        assert schema.field("latitude").type == pa.float64()
         assert schema.field("altitude").type == pa.float32()
         assert schema.field("temperature").type == pa.int8()
 
@@ -79,15 +79,15 @@ class TestExtraColumns:
     def test_default_returns_only_standard(self, dev_fields_path):
         """Default load returns standard columns, not extras."""
         data = Activity.load_fit(dev_fields_path).data
-        assert data.num_columns == 12
+        assert data.num_columns == 10
 
     def test_extra_columns_parameter(self, dev_fields_path):
         """extra_columns adds specific extras alongside standard."""
         data = Activity.load_fit(
             dev_fields_path, extra_columns=["form_power", "ground_time"]
         ).data
-        assert data.num_columns == 14
-        assert data.column_names[:12] == STANDARD_COLUMNS
+        assert data.num_columns == len(STANDARD_COLUMNS) + 2
+        assert data.column_names[:len(STANDARD_COLUMNS)] == STANDARD_COLUMNS
         assert "form_power" in data.column_names
         assert "ground_time" in data.column_names
 

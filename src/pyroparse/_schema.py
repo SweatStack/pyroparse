@@ -12,25 +12,25 @@ STANDARD_COLUMNS = [
     "power",
     "cadence",
     "speed",
-    "position_lat",
-    "position_long",
+    "latitude",
+    "longitude",
     "altitude",
     "temperature",
     "distance",
-    "core_temperature",
-    "smo2",
 ]
 
 _STANDARD_COLUMNS_SET = frozenset(STANDARD_COLUMNS)
 
-_STANDARD_TYPES: dict[str, pa.DataType] = {
+# Known types for standard and canonical extra columns.
+# Used by select_columns() to create typed null columns when missing="ignore".
+_CANONICAL_TYPES: dict[str, pa.DataType] = {
     "timestamp": pa.timestamp("us", tz="UTC"),
     "heart_rate": pa.int16(),
     "power": pa.int16(),
     "cadence": pa.int16(),
     "speed": pa.float32(),
-    "position_lat": pa.float64(),
-    "position_long": pa.float64(),
+    "latitude": pa.float64(),
+    "longitude": pa.float64(),
     "altitude": pa.float32(),
     "temperature": pa.int8(),
     "distance": pa.float64(),
@@ -39,10 +39,7 @@ _STANDARD_TYPES: dict[str, pa.DataType] = {
 }
 
 METRIC_COLUMNS = {"heart_rate", "power", "cadence", "speed"}
-GPS_COLUMNS = {"position_lat", "position_long"}
-
-# Keep FIXED_COLUMNS as an alias for backward compat within the codebase.
-FIXED_COLUMNS = _STANDARD_COLUMNS_SET
+GPS_COLUMNS = {"latitude", "longitude"}
 
 METADATA_KEY = b"pyroparse"
 PARQUET_COMPRESSION = "zstd"
@@ -115,7 +112,7 @@ def select_columns(
     if missing_cols and missing == "ignore":
         for col_name in target:
             if col_name not in available:
-                dtype = _STANDARD_TYPES.get(col_name, pa.float64())
+                dtype = _CANONICAL_TYPES.get(col_name, pa.float64())
                 null_col = pa.nulls(table.num_rows, type=dtype)
                 result = result.append_column(col_name, null_col)
         result = result.select(target)
