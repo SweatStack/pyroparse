@@ -14,6 +14,7 @@ target/
 *.so
 *.pyd
 *.dylib
+*.dSYM/
 
 # IDE
 .idea/
