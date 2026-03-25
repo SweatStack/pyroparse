@@ -152,7 +152,7 @@ fn count_nonzero_i16(records: &[RecordRow], accessor: impl Fn(&RecordRow) -> Opt
 
 /// Canonical columns that can come from either a standard FIT field or a
 /// developer field.  Each entry describes one such pair.
-struct MergeableColumn {
+struct ColumnAttribution {
     /// Column name in the output schema (e.g. "power").
     name: &'static str,
     /// ANT+ device_type values that identify the standard-field source device.
@@ -160,10 +160,13 @@ struct MergeableColumn {
     /// Manufacturers known to produce this metric (fallback when ANT+ device
     /// type is absent — common for Bluetooth/ANT-FS fitness equipment).
     known_manufacturers: &'static [&'static str],
+    /// Whether this column can conflict with a developer field and needs the
+    /// majority-wins merge logic.
+    mergeable: bool,
 }
 
-const MERGEABLE_COLUMNS: &[MergeableColumn] = &[
-    MergeableColumn {
+const COLUMN_ATTRIBUTIONS: &[ColumnAttribution] = &[
+    ColumnAttribution {
         name: "power",
         ant_device_types: &[11], // bike_power
         known_manufacturers: &[
@@ -180,16 +183,43 @@ const MERGEABLE_COLUMNS: &[MergeableColumn] = &[
             "wahoo_fitness",
             "wattbike",
         ],
+        mergeable: true,
     },
-    MergeableColumn {
+    ColumnAttribution {
         name: "cadence",
         ant_device_types: &[121, 122], // bike_speed_cadence, stride_speed_distance
         known_manufacturers: &[],
+        mergeable: true,
     },
-    MergeableColumn {
+    ColumnAttribution {
         name: "heart_rate",
         ant_device_types: &[120], // heart_rate monitor
         known_manufacturers: &[],
+        mergeable: false,
+    },
+    ColumnAttribution {
+        name: "speed",
+        ant_device_types: &[123, 121], // bike_speed, bike_speed_cadence
+        known_manufacturers: &[],
+        mergeable: false,
+    },
+    ColumnAttribution {
+        name: "temperature",
+        ant_device_types: &[25], // environment_sensor_legacy
+        known_manufacturers: &[],
+        mergeable: false,
+    },
+    ColumnAttribution {
+        name: "distance",
+        ant_device_types: &[],
+        known_manufacturers: &[],
+        mergeable: false,
+    },
+    ColumnAttribution {
+        name: "altitude",
+        ant_device_types: &[],
+        known_manufacturers: &[],
+        mergeable: false,
     },
 ];
 
@@ -1127,43 +1157,61 @@ fn find_creator_device(devices: &[DeviceMeta]) -> Option<usize> {
 }
 
 /// Build per-session device list with column attribution based on merge outcome.
+///
+/// `metrics` lists standard columns that actually contain data in this session,
+/// so we only attribute columns the session really has.
 fn attribute_devices(
     base_devices: &[DeviceMeta],
     developer_sensors: &[DeveloperSensor],
     dev_won: u8,
+    metrics: &[String],
 ) -> (Vec<DeviceMeta>, Vec<DeveloperSensor>) {
     let mut devices: Vec<DeviceMeta> = base_devices.to_vec();
     let mut sensors: Vec<DeveloperSensor> = developer_sensors.to_vec();
 
-    for (bit, col) in MERGEABLE_COLUMNS.iter().enumerate() {
-        let dev_won_this = dev_won & (1 << bit) != 0;
-        if dev_won_this {
-            // Developer sensor won — it already has this column from
-            // classify_developer_sensors, nothing to do.
-        } else {
-            // Standard field won (or no developer field existed) — remove
-            // column from developer sensors and attribute to hardware device.
-            for sensor in &mut sensors {
-                sensor.columns.retain(|c| c != col.name);
+    // Track which mergeable columns we've seen (for bitmask indexing).
+    let mut merge_bit: usize = 0;
+    for col in COLUMN_ATTRIBUTIONS {
+        // Only attribute columns that actually have data in this session.
+        if !metrics.contains(&col.name.to_string()) {
+            if col.mergeable {
+                merge_bit += 1;
             }
-            // Find the best device: consider both ANT+ type and known manufacturer,
-            // preferring the one with the highest device_index (most recently
-            // registered, most likely the active source in multi-sport sessions).
-            let ant_match = find_device_by_ant_type(&devices, col.ant_device_types);
-            let mfr_match = find_device_by_manufacturer(&devices, col.known_manufacturers);
-            let device_idx = match (ant_match, mfr_match) {
-                (Some(a), Some(m)) if a != m => {
-                    let a_idx = devices[a].device_index.unwrap_or(0);
-                    let m_idx = devices[m].device_index.unwrap_or(0);
-                    Some(if m_idx > a_idx { m } else { a })
-                }
-                (a, m) => a.or(m),
+            continue;
+        }
+
+        if col.mergeable {
+            let dev_won_this = dev_won & (1 << merge_bit) != 0;
+            merge_bit += 1;
+            if dev_won_this {
+                // Developer sensor won — it already has this column from
+                // classify_developer_sensors, nothing to do.
+                continue;
             }
-            .or_else(|| find_creator_device(&devices));
-            if let Some(idx) = device_idx {
-                if !devices[idx].columns.contains(&col.name.to_string()) {
-                    devices[idx].columns.push(col.name.to_string());
-                }
+        }
+
+        // Standard field won (or non-mergeable) — remove column from
+        // developer sensors and attribute to hardware device.
+        for sensor in &mut sensors {
+            sensor.columns.retain(|c| c != col.name);
+        }
+        // Find the best device: consider both ANT+ type and known manufacturer,
+        // preferring the one with the highest device_index (most recently
+        // registered, most likely the active source in multi-sport sessions).
+        let ant_match = find_device_by_ant_type(&devices, col.ant_device_types);
+        let mfr_match = find_device_by_manufacturer(&devices, col.known_manufacturers);
+        let device_idx = match (ant_match, mfr_match) {
+            (Some(a), Some(m)) if a != m => {
+                let a_idx = devices[a].device_index.unwrap_or(0);
+                let m_idx = devices[m].device_index.unwrap_or(0);
+                Some(if m_idx > a_idx { m } else { a })
+            }
+            (a, m) => a.or(m),
+        }
+        .or_else(|| find_creator_device(&devices));
+        if let Some(idx) = device_idx {
+            if !devices[idx].columns.contains(&col.name.to_string()) {
+                devices[idx].columns.push(col.name.to_string());
             }
         }
     }
@@ -1265,9 +1313,10 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
         // Single session (or no sessions): merge across all records.
         let dev_won = resolve_merge(&mut parsed.records);
         let batch = build_batch(&parsed.records, &parsed.extra_col_info, &parsed.extra_data)?;
+        let metrics = detect_metrics(&batch);
         let deduped = dedup_devices(&parsed.devices);
         let (devices, sensors) =
-            attribute_devices(&deduped, &parsed.developer_sensors, dev_won);
+            attribute_devices(&deduped, &parsed.developer_sensors, dev_won, &metrics);
 
         activities.append(build_activity_dict(
             py,
@@ -1307,9 +1356,10 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             let session_batch = build_batch(session_records, &[], &[])?;
             let full_batch = merge_fixed_with_extras(&session_batch, &batch.slice(first, len))?;
 
+            let metrics = detect_metrics(&full_batch);
             let deduped = dedup_devices(&device_groups[si]);
             let (devices, sensors) =
-                attribute_devices(&deduped, &parsed.developer_sensors, dev_won);
+                attribute_devices(&deduped, &parsed.developer_sensors, dev_won, &metrics);
 
             activities.append(build_activity_dict(
                 py,
