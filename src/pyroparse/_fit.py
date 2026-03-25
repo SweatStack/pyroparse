@@ -192,8 +192,12 @@ def _build_device(raw: dict) -> Device:
 def _build_developer_sensor(raw: dict) -> Device:
     manufacturer = raw.get("manufacturer")
     product = raw.get("product")
-    parts = [p for p in (manufacturer, product) if p]
-    name = " ".join(parts) if parts else None
+    # Avoid redundant names like "concept2 Concept2" when they match.
+    if manufacturer and product and manufacturer.lower() == product.lower():
+        name = product  # prefer the capitalized product name
+    else:
+        parts = [p for p in (manufacturer, product) if p]
+        name = " ".join(parts) if parts else None
     return Device(
         name=name,
         manufacturer=manufacturer,

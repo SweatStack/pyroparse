@@ -108,15 +108,15 @@ class TestMetadata:
 
 
 class TestRepr:
-    def test_contains_record_count(self, fit_path):
-        assert "21,666" in repr(Activity.load_fit(fit_path))
-
-    def test_contains_column_count(self, fit_path):
-        r = repr(Activity.load_fit(fit_path))
-        assert "columns" in r
-
     def test_contains_sport(self, fit_path):
         assert "cycling" in repr(Activity.load_fit(fit_path))
+
+    def test_contains_device_count(self, fit_path):
+        assert "devices" in repr(Activity.load_fit(fit_path))
+
+    def test_matches_metadata_repr(self, fit_path):
+        a = Activity.load_fit(fit_path)
+        assert repr(a).replace("Activity(", "") == repr(a.metadata).replace("ActivityMetadata(", "")
 
     def test_accepts_string_path(self, fit_path):
         activity = Activity.load_fit(str(fit_path))

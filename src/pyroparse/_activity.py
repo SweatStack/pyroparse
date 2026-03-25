@@ -157,9 +157,4 @@ class Activity:
     # -- Dunder ----------------------------------------------------------------
 
     def __repr__(self) -> str:
-        sport = self._metadata.sport or "unknown"
-        if self._data is not None:
-            rows = f"{self._data.num_rows:,}"
-            cols = self._data.num_columns
-            return f"Activity({sport}, {rows} records, {cols} columns)"
-        return f"Activity({sport}, not loaded)"
+        return self._metadata._repr("Activity")
