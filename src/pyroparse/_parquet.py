@@ -94,7 +94,6 @@ def _metadata_to_json(meta: ActivityMetadata) -> bytes:
                 "product": d.product,
                 "serial_number": d.serial_number,
                 "device_type": d.device_type,
-                "sensor_type": d.sensor_type,
                 "columns": d.columns or [],
             }
             for d in meta.devices
@@ -125,7 +124,6 @@ def _json_to_metadata(raw: bytes) -> ActivityMetadata:
             product=d.get("product"),
             serial_number=d.get("serial_number"),
             device_type=d.get("device_type"),
-            sensor_type=d.get("sensor_type"),
             columns=d.get("columns") or [],
         )
         for d in data.get("devices", [])

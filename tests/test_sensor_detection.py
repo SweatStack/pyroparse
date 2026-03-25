@@ -11,11 +11,6 @@ class TestDeveloperSensorDetection:
         stryd = next((d for d in devices if d.manufacturer == "stryd"), None)
         assert stryd is not None
 
-    def test_stryd_has_sensor_type(self, dev_fields_path):
-        devices = Activity.load_fit(dev_fields_path).metadata.devices
-        stryd = next(d for d in devices if d.manufacturer == "stryd")
-        assert stryd.sensor_type == "foot_pod"
-
     def test_stryd_has_columns(self, dev_fields_path):
         devices = Activity.load_fit(dev_fields_path).metadata.devices
         stryd = next(d for d in devices if d.manufacturer == "stryd")
@@ -36,11 +31,6 @@ class TestDeveloperSensorDetection:
         devices = Activity.load_fit(dev_fields_path).metadata.devices
         core = next((d for d in devices if d.manufacturer == "core"), None)
         assert core is not None
-
-    def test_core_has_sensor_type(self, dev_fields_path):
-        devices = Activity.load_fit(dev_fields_path).metadata.devices
-        core = next(d for d in devices if d.manufacturer == "core")
-        assert core.sensor_type == "core_temp"
 
     def test_core_has_columns(self, dev_fields_path):
         devices = Activity.load_fit(dev_fields_path).metadata.devices
@@ -106,13 +96,11 @@ class TestLazySensorDetection:
         devices = Activity.open_fit(dev_fields_path).metadata.devices
         stryd = next((d for d in devices if d.manufacturer == "stryd"), None)
         assert stryd is not None
-        assert stryd.sensor_type == "foot_pod"
 
     def test_open_fit_detects_core(self, dev_fields_path):
         devices = Activity.open_fit(dev_fields_path).metadata.devices
         core = next((d for d in devices if d.manufacturer == "core"), None)
         assert core is not None
-        assert core.sensor_type == "core_temp"
 
     def test_open_fit_no_columns(self, dev_fields_path):
         """Metadata-only scan cannot determine column attribution (requires data)."""
@@ -209,7 +197,6 @@ class TestPerSessionAttribution:
         for i, a in enumerate(Session.load_fit(multi_session_path).activities):
             core = next((d for d in a.metadata.devices if d.manufacturer == "core"), None)
             assert core is not None, f"Activity {i} should detect CORE sensor"
-            assert core.sensor_type == "core_temp"
 
     def test_power_attribution_differs_across_sessions(self, multi_session_path):
         """At least one session should attribute power differently (the whole point)."""
@@ -226,16 +213,6 @@ class TestPerSessionAttribution:
 
 class TestParquetSensorRoundtrip:
     """Verify sensor info survives Parquet serialization."""
-
-    def test_sensor_type_preserved(self, dev_fields_path, tmp_path):
-        original = Activity.load_fit(dev_fields_path)
-        pq_path = tmp_path / "test.parquet"
-        original.to_parquet(pq_path)
-
-        loaded = Activity.load_parquet(pq_path)
-        stryd = next((d for d in loaded.metadata.devices if d.manufacturer == "stryd"), None)
-        assert stryd is not None
-        assert stryd.sensor_type == "foot_pod"
 
     def test_columns_preserved(self, dev_fields_path, tmp_path):
         original = Activity.load_fit(dev_fields_path)

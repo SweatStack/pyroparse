@@ -167,12 +167,18 @@ const MERGEABLE_COLUMNS: &[MergeableColumn] = &[
         name: "power",
         ant_device_types: &[11], // bike_power
         known_manufacturers: &[
-            "wahoo_fitness",
-            "stages_cycling",
-            "favero",
-            "wattbike",
             "concept2",
+            "elite",
+            "favero",
+            "quarq",
+            "rotor",
             "shimano",
+            "saris",
+            "srm",
+            "stages_cycling",
+            "tacx",
+            "wahoo_fitness",
+            "wattbike",
         ],
     },
     MergeableColumn {
@@ -336,64 +342,19 @@ fn is_handled_field(name: &str) -> bool {
 struct DeveloperSensor {
     manufacturer: String,
     product: String,
-    sensor_type: String,
     columns: Vec<String>,
 }
 
-/// A known CIQ application: UUID, identity, and a filter function that
-/// decides which developer fields belong to this sensor.
-struct KnownCiqApp {
-    uuid: &'static str,
-    manufacturer: &'static str,
-    product: &'static str,
-    sensor_type: &'static str,
-    /// Return true if this field name belongs to this sensor.
-    /// When a CIQ app relays data from multiple physical sensors (common
-    /// pattern), each sensor's filter claims only its own fields.
-    owns_field: fn(&str) -> bool,
-}
-
-/// Check if a field name is a body temperature field (CORE sensor).
-fn is_core_field(name: &str) -> bool {
-    let l = name.to_lowercase();
-    (l.contains("core") && l.contains("temp"))
-        || (l.contains("skin") && l.contains("temp"))
-        || l.starts_with("ciq_core")
-        || l.starts_with("ciq_skin")
-        || l == "core_data_quality"
-        || l == "core_reserved"
-}
-
-/// Check if a field name is a muscle oxygen field (Moxy/Humon/Train.Red).
-fn is_muscle_oxygen_field(name: &str) -> bool {
-    let l = name.to_lowercase();
-    l.contains("muscle oxygen") || l == "smo2" || l.contains("hemoglobin")
-}
-
-/// Known CIQ app UUIDs.  To add a new sensor, add a row with its UUID
-/// and a filter function for its field names.
-const KNOWN_CIQ_APPS: &[KnownCiqApp] = &[
-    KnownCiqApp {
-        uuid: "6957fe68-83fe-4ed6-8613-413f70624bb5",
-        manufacturer: "core",
-        product: "CORE",
-        sensor_type: "core_temp",
-        owns_field: is_core_field,
-    },
-    KnownCiqApp {
-        uuid: "9a0508b9-0256-4639-88b3-a2690a14ddf9",
-        manufacturer: "concept2",
-        product: "Concept2",
-        sensor_type: "rowing_erg",
-        owns_field: |name| !is_core_field(name) && !is_muscle_oxygen_field(name),
-    },
-    KnownCiqApp {
-        uuid: "18fb2cf0-1a4b-430d-ad66-988c847421f4",
-        manufacturer: "stryd",
-        product: "Stryd",
-        sensor_type: "foot_pod",
-        owns_field: |name| !is_core_field(name) && !is_muscle_oxygen_field(name),
-    },
+/// Known CIQ app UUIDs → (manufacturer, product).
+///
+/// This is purely cosmetic — it gives human-readable names to developer
+/// sensors.  Unknown UUIDs still work; they just show the UUID as the name.
+/// To add a new sensor, add a row.
+const KNOWN_CIQ_APPS: &[(&str, &str, &str)] = &[
+    // (uuid, manufacturer, product)
+    ("6957fe68-83fe-4ed6-8613-413f70624bb5", "core", "CORE"),
+    ("9a0508b9-0256-4639-88b3-a2690a14ddf9", "concept2", "Concept2"),
+    ("18fb2cf0-1a4b-430d-ad66-988c847421f4", "stryd", "Stryd"),
 ];
 
 /// Format 16 raw bytes as a lowercase UUID string (RFC 4122).
@@ -428,11 +389,18 @@ fn value_to_uuid(val: &Value) -> Option<String> {
     }
 }
 
-/// Look up a CIQ app UUID in the known-apps table.
-fn lookup_ciq_app(uuid: &str) -> Option<&'static KnownCiqApp> {
-    KNOWN_CIQ_APPS
-        .iter()
-        .find(|app| app.uuid.eq_ignore_ascii_case(uuid))
+/// Look up a CIQ app UUID → (manufacturer, product).  Returns the UUID
+/// itself as both manufacturer and product for unknown apps.
+fn name_for_uuid(uuid: &str) -> (&str, &str) {
+    for &(u, mfr, product) in KNOWN_CIQ_APPS {
+        if u.eq_ignore_ascii_case(uuid) {
+            return (mfr, product);
+        }
+    }
+    // Leak the UUID string so we can return &str with 'static-like lifetime.
+    // This is fine — there are at most a handful of unknown UUIDs per file.
+    let leaked: &str = Box::leak(uuid.to_string().into_boxed_str());
+    (leaked, leaked)
 }
 
 /// Map a developer field name to a fixed column, if it contributes to one.
@@ -459,93 +427,47 @@ fn column_for_developer_field(name: &str) -> Option<String> {
     Some(normalized)
 }
 
-/// Classify developer fields into sensors using CIQ app UUIDs.
+/// Classify developer fields into sensors.
 ///
-/// Primary path: match `developer_data_index` → `application_id` UUID from
-/// DeveloperDataId messages.  This is the authoritative, stable identifier.
-///
-/// Fallback: for files without DeveloperDataId messages (rare), all fields
-/// are grouped under a single "unknown" sensor.
+/// Uses the temporal relationship between DeveloperDataId and FieldDescription
+/// messages: each FieldDescription belongs to the most recent DeveloperDataId
+/// that registered its `developer_data_index`.  This is tracked during parsing
+/// in `dev_field_owners` (field_name → app UUID).
 ///
 /// When `include_columns` is true, each sensor's `columns` list is populated
 /// with the output column names that appear in the data.  When false (metadata-
 /// only scan), sensors are classified but columns are left empty.
 fn classify_developer_sensors(
-    dev_field_groups: &BTreeMap<u8, Vec<String>>,
-    dev_app_uuids: &BTreeMap<u8, Vec<String>>,
+    dev_field_owners: &BTreeMap<String, String>,
     present_extra_columns: &BTreeSet<String>,
     include_columns: bool,
 ) -> Vec<DeveloperSensor> {
-    let mut sensor_columns: BTreeMap<
-        (&str, &str, &str), // (manufacturer, product, sensor_type)
-        BTreeSet<String>,
-    > = BTreeMap::new();
+    // Group fields by their owning app UUID.
+    let mut app_columns: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
 
-    // Build a map from developer_data_index → list of known apps.
-    let mut apps_per_idx: BTreeMap<u8, Vec<&KnownCiqApp>> = BTreeMap::new();
-    for (&idx, uuids) in dev_app_uuids {
-        for uuid in uuids {
-            if let Some(app) = lookup_ciq_app(uuid) {
-                apps_per_idx.entry(idx).or_default().push(app);
-            }
-        }
-    }
-
-    // Track which fields have been claimed (by column name) so that
-    // a field belonging to a sensor at its own dedicated index isn't
-    // also grabbed by a catch-all sensor at a shared index.
-    let mut claimed: BTreeSet<String> = BTreeSet::new();
-
-    // Process indices with a single known app first (unambiguous),
-    // then indices with multiple apps (need filtering).
-    let mut idx_order: Vec<u8> = apps_per_idx.keys().copied().collect();
-    idx_order.sort_by_key(|idx| {
-        let n = apps_per_idx.get(idx).map_or(0, |v| v.len());
-        if n == 1 { 0 } else { 1 } // single-app indices first
-    });
-
-    for &dev_idx in &idx_order {
-        let fields = match dev_field_groups.get(&dev_idx) {
-            Some(f) => f,
-            None => continue,
-        };
-        let apps = match apps_per_idx.get(&dev_idx) {
-            Some(a) => a,
-            None => continue,
-        };
-
-        for app in apps {
-            let entry = sensor_columns
-                .entry((app.manufacturer, app.product, app.sensor_type))
-                .or_default();
-            if include_columns {
-                for name in fields {
-                    if !(app.owns_field)(name) {
-                        continue;
-                    }
-                    if let Some(col) = column_for_developer_field(name) {
-                        if claimed.contains(&col) {
-                            continue; // Already owned by another sensor.
-                        }
-                        let exists =
-                            present_extra_columns.contains(&col) || is_canonical_column(&col);
-                        if exists {
-                            entry.insert(col.clone());
-                            claimed.insert(col);
-                        }
-                    }
+    for (field_name, uuid) in dev_field_owners {
+        let (_, _) = name_for_uuid(uuid); // ensure entry exists
+        let entry = app_columns.entry(uuid.as_str()).or_default();
+        if include_columns {
+            if let Some(col) = column_for_developer_field(field_name) {
+                let exists =
+                    present_extra_columns.contains(&col) || is_canonical_column(&col);
+                if exists {
+                    entry.insert(col);
                 }
             }
         }
     }
 
-    sensor_columns
+    app_columns
         .into_iter()
-        .map(|((manufacturer, product, sensor_type), cols)| DeveloperSensor {
-            manufacturer: manufacturer.into(),
-            product: product.into(),
-            sensor_type: sensor_type.into(),
-            columns: cols.into_iter().collect(),
+        .map(|(uuid, cols)| {
+            let (manufacturer, product) = name_for_uuid(uuid);
+            DeveloperSensor {
+                manufacturer: manufacturer.into(),
+                product: product.into(),
+                columns: cols.into_iter().collect(),
+            }
         })
         .collect()
 }
@@ -619,8 +541,10 @@ struct ParseResult {
 fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
     let mut sessions = Vec::new();
     let mut devices = Vec::new();
-    let mut dev_field_groups: BTreeMap<u8, Vec<String>> = BTreeMap::new();
-    let mut dev_app_uuids: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+    // Temporal tracking: most recent DeveloperDataId UUID per index.
+    let mut current_app_for_idx: BTreeMap<u8, String> = BTreeMap::new();
+    // field_name → owning app UUID (set when FieldDescription follows DeveloperDataId).
+    let mut dev_field_owners: BTreeMap<String, String> = BTreeMap::new();
 
     // ── Pass 1: process metadata messages + discover extra columns ────────
     let mut n_rows = 0usize;
@@ -719,10 +643,7 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                     }
                 }
                 if let (Some(idx), Some(uuid)) = (dev_idx, app_id) {
-                    let uuids = dev_app_uuids.entry(idx).or_default();
-                    if !uuids.contains(&uuid) {
-                        uuids.push(uuid);
-                    }
+                    current_app_for_idx.insert(idx, uuid);
                 }
             }
             MesgNum::FieldDescription => {
@@ -737,7 +658,14 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                 }
                 if let (Some(idx), Some(name)) = (dev_idx, field_name) {
                     if !name.is_empty() {
-                        dev_field_groups.entry(idx).or_default().push(name);
+                        // Attribute this field to the current app at this index,
+                        // but only on first encounter — later sessions re-emit
+                        // FieldDescriptions and the index may have been reassigned.
+                        if !dev_field_owners.contains_key(&name) {
+                            if let Some(uuid) = current_app_for_idx.get(&idx) {
+                                dev_field_owners.insert(name, uuid.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -769,8 +697,7 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
     let present_extra_columns: BTreeSet<String> =
         extra_col_info.iter().map(|(name, _)| name.clone()).collect();
     let developer_sensors = classify_developer_sensors(
-        &dev_field_groups,
-        &dev_app_uuids,
+        &dev_field_owners,
         &present_extra_columns,
         true,
     );
@@ -1042,7 +969,6 @@ fn sensor_to_dict<'py>(
     let dict = PyDict::new_bound(py);
     dict.set_item("manufacturer", &sensor.manufacturer)?;
     dict.set_item("product", &sensor.product)?;
-    dict.set_item("sensor_type", &sensor.sensor_type)?;
     let cols = PyList::empty_bound(py);
     for c in &sensor.columns {
         cols.append(c)?;
@@ -1431,11 +1357,35 @@ fn sport_name(v: u8) -> &'static str {
     }
 }
 
+/// Map FIT manufacturer IDs to names.  Derived from the FIT SDK profile.
+/// Only includes manufacturers commonly seen in fitness device files.
 fn manufacturer_name(v: u16) -> &'static str {
     match v {
-        1 | 15 | 44 => "garmin", 32 => "wahoo_fitness", 38 => "favero",
-        69 => "stages_cycling", 76 => "mio", 86 => "shimano",
-        89 => "concept2", 260 => "zwift", 263 => "hammerhead",
+        1 | 15 => "garmin",
+        6 => "srm",
+        7 => "quarq",
+        9 => "saris",
+        23 => "suunto",
+        32 => "wahoo_fitness",
+        38 => "osynce",
+        40 => "concept2",
+        41 => "shimano",
+        44 => "brim_brothers",
+        48 => "pioneer",
+        60 => "rotor",
+        63 => "specialized",
+        69 => "stages_cycling",
+        70 => "sigmasport",
+        73 => "wattbike",
+        76 => "moxy",
+        81 => "bontrager",
+        86 => "elite",
+        89 => "tacx",
+        95 => "stryd",
+        260 => "zwift",
+        263 => "favero",
+        265 => "coros",
+        289 => "hammerhead",
         _ => "unknown",
     }
 }
@@ -1490,8 +1440,8 @@ impl<'a> FitScanner<'a> {
     fn scan(&mut self) -> Result<ScanResult, String> {
         let mut result = ScanResult::default();
         let mut metric_set = std::collections::HashSet::new();
-        let mut dev_field_groups: BTreeMap<u8, Vec<String>> = BTreeMap::new();
-        let mut dev_app_uuids: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+        let mut current_app_for_idx: BTreeMap<u8, String> = BTreeMap::new();
+        let mut dev_field_owners: BTreeMap<String, String> = BTreeMap::new();
 
         while self.pos < self.end {
             let header = self.read_byte()?;
@@ -1541,10 +1491,7 @@ impl<'a> FitScanner<'a> {
                             if let Some((idx, uuid)) =
                                 Self::decode_developer_data_id(&fields)
                             {
-                                let uuids = dev_app_uuids.entry(idx).or_default();
-                                if !uuids.contains(&uuid) {
-                                    uuids.push(uuid);
-                                }
+                                current_app_for_idx.insert(idx, uuid);
                             }
                         }
                         MESG_FIELD_DESCRIPTION => {
@@ -1558,7 +1505,11 @@ impl<'a> FitScanner<'a> {
                                 if !is_canonical_column(&normalized) {
                                     metric_set.insert(normalized);
                                 }
-                                dev_field_groups.entry(idx).or_default().push(name);
+                                if !dev_field_owners.contains_key(&name) {
+                                    if let Some(uuid) = current_app_for_idx.get(&idx) {
+                                        dev_field_owners.insert(name, uuid.clone());
+                                    }
+                                }
                             }
                         }
                         _ => {}
@@ -1573,8 +1524,7 @@ impl<'a> FitScanner<'a> {
         // (per-session merge).  Sensors are returned with empty column lists.
         let empty = BTreeSet::new();
         result.developer_sensors = classify_developer_sensors(
-            &dev_field_groups,
-            &dev_app_uuids,
+            &dev_field_owners,
             &empty,
             false,
         );

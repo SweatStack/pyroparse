@@ -11,7 +11,6 @@ class Device:
     product: str | None = None
     serial_number: str | None = None
     device_type: str | None = None  # "creator", "sensor", or "developer"
-    sensor_type: str | None = None  # e.g. "foot_pod", "core_temp", "muscle_oxygen"
     columns: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -20,9 +19,7 @@ class Device:
     def __repr__(self) -> str:
         label = self.name or "unknown"
         tag = self.device_type or "unknown"
-        if self.sensor_type:
-            tag += f"/{self.sensor_type}"
-        cols = f", columns={self.columns}" if self.columns else ""
+        cols = f", columns=[{','.join(self.columns)}]" if self.columns else ""
         return f"Device({label} ({tag}){cols})"
 
 
