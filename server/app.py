@@ -3,19 +3,44 @@
 from __future__ import annotations
 
 import io
-import tempfile
+import zipfile
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.csv as pcsv
 import pyarrow.parquet as pq
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
-from pyroparse import Activity
+from pyroparse import Activity, Session
+from pyroparse._errors import MultipleActivitiesError
+from pyroparse._schema import select_columns
 
 _HTML = (Path(__file__).parent / "index.html").read_text()
+
+
+def _parse_columns(raw: str | None) -> list[str] | str | None:
+    if raw is None or raw in ("standard", ""):
+        return None
+    if raw == "all":
+        return "all"
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+def _write_table(table: pa.Table, fmt: str) -> bytes:
+    buf = io.BytesIO()
+    if fmt == "csv":
+        pcsv.write_csv(table, buf)
+    else:
+        pq.write_table(table, buf, compression="zstd")
+    return buf.getvalue()
+
+
+def _activity_filename(index: int, activity: Activity, ext: str) -> str:
+    sport = (activity.metadata.sport or "unknown").replace(".", "_")
+    return f"{index}_{sport}.{ext}"
 
 
 async def index(_request: Request) -> HTMLResponse:
@@ -26,43 +51,47 @@ async def convert(request: Request) -> Response:
     form = await request.form()
     upload = form["file"]
     fmt = form.get("format", "parquet")
-    columns_raw = form.get("columns", "standard")
-
-    if columns_raw in ("standard", ""):
-        columns = None
-    elif columns_raw == "all":
-        columns = "all"
-    else:
-        columns = [c.strip() for c in columns_raw.split(",") if c.strip()]
+    columns = _parse_columns(form.get("columns") or form.get("columns_list"))
+    allow_multi = form.get("allow_multi", "").lower() == "true"
+    ext = "csv" if fmt == "csv" else "parquet"
 
     contents = await upload.read()
-
-    with tempfile.NamedTemporaryFile(suffix=".fit", delete=False) as tmp:
-        tmp.write(contents)
-        tmp_path = Path(tmp.name)
-
-    try:
-        activity = Activity.load_fit(tmp_path, columns=columns)
-    finally:
-        tmp_path.unlink()
-
     stem = Path(upload.filename).stem if upload.filename else "output"
 
-    if fmt == "csv":
-        buf = io.BytesIO()
-        pcsv.write_csv(activity.data, buf)
+    # Parse the file.
+    try:
+        activities = [Activity.load_fit(contents, columns=columns)]
+    except MultipleActivitiesError as exc:
+        if not allow_multi:
+            return JSONResponse(
+                {"error": f"FIT file contains {exc.count} activities. "
+                 "Set allow_multi=true to process all activities (returns zip)."},
+                status_code=400,
+            )
+        session = Session.load_fit(contents)
+        activities = session.activities
+
+    # Single file response (no allow_multi flag).
+    if not allow_multi:
+        table = select_columns(activities[0].data, columns)
+        content_type = "text/csv" if fmt == "csv" else "application/octet-stream"
         return Response(
-            content=buf.getvalue(),
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="{stem}.csv"'},
+            content=_write_table(table, fmt),
+            media_type=content_type,
+            headers={"Content-Disposition": f'attachment; filename="{stem}.{ext}"'},
         )
 
-    buf = io.BytesIO()
-    activity.to_parquet(buf)
+    # Zip response.
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, act in enumerate(activities):
+            table = select_columns(act.data, columns)
+            zf.writestr(_activity_filename(i, act, ext), _write_table(table, fmt))
+
     return Response(
-        content=buf.getvalue(),
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{stem}.parquet"'},
+        content=zip_buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{stem}.zip"'},
     )
 
 
