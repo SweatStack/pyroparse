@@ -129,14 +129,19 @@ def _build_metadata(raw: dict) -> ActivityMetadata:
 
 
 def _deduplicate_devices(devices: list[Device]) -> list[Device]:
-    seen: set[str] = set()
+    seen: dict[str, int] = {}  # key → index in result
     result: list[Device] = []
     for d in devices:
         key = d.serial_number or d.name or ""
         if key and key in seen:
+            # Merge columns from duplicate into the first occurrence.
+            existing = result[seen[key]]
+            for col in d.columns:
+                if col not in existing.columns:
+                    existing.columns.append(col)
             continue
         if key:
-            seen.add(key)
+            seen[key] = len(result)
         result.append(d)
     return result
 

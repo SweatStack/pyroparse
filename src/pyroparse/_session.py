@@ -4,8 +4,9 @@ import os
 
 import pyarrow as pa
 
-from pyroparse._activity import Activity
+from pyroparse._activity import Activity, _filter_device_columns
 from pyroparse._metadata import ActivityMetadata
+from pyroparse._schema import select_columns
 
 
 class Session:
@@ -21,14 +22,33 @@ class Session:
         return list(self._activities)
 
     @classmethod
-    def load_fit(cls, source: str | os.PathLike[str] | bytes) -> Session:
+    def load_fit(
+        cls,
+        source: str | os.PathLike[str] | bytes,
+        *,
+        columns: list[str] | str | None = None,
+        extra_columns: list[str] | None = None,
+        missing: str = "raise",
+    ) -> Session:
         from pyroparse._fit import load_fit_multi
 
         pairs = load_fit_multi(source)
-        return cls([Activity(data, meta) for data, meta in pairs])
+        activities: list[Activity] = []
+        for data, meta in pairs:
+            data = select_columns(data, columns, extra_columns, missing)
+            _filter_device_columns(meta, data)
+            activities.append(Activity(data, meta))
+        return cls(activities)
 
     @classmethod
-    def open_fit(cls, path: str | os.PathLike[str]) -> Session:
+    def open_fit(
+        cls,
+        path: str | os.PathLike[str],
+        *,
+        columns: list[str] | str | None = None,
+        extra_columns: list[str] | None = None,
+        missing: str = "raise",
+    ) -> Session:
         """Load metadata now, defer record data until ``.data`` is accessed."""
         from pyroparse._fit import load_fit_metadata_multi, load_fit_multi
 
@@ -38,16 +58,18 @@ class Session:
         # All activities share a single lazy parse — first .data access triggers it.
         cache: dict[int, pa.Table] = {}
 
-        def make_loader(idx: int):
+        def make_loader(idx: int, meta: ActivityMetadata):
             def loader() -> pa.Table:
                 if not cache:
                     for i, (data, _) in enumerate(load_fit_multi(resolved)):
                         cache[i] = data
-                return cache.pop(idx)
+                data = select_columns(cache.pop(idx), columns, extra_columns, missing)
+                _filter_device_columns(meta, data)
+                return data
             return loader
 
         return cls([
-            Activity(None, meta, _loader=make_loader(i))
+            Activity(None, meta, _loader=make_loader(i, meta))
             for i, meta in enumerate(metas)
         ])
 

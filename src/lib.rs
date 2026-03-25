@@ -186,6 +186,11 @@ const MERGEABLE_COLUMNS: &[MergeableColumn] = &[
         ant_device_types: &[121, 122], // bike_speed_cadence, stride_speed_distance
         known_manufacturers: &[],
     },
+    MergeableColumn {
+        name: "heart_rate",
+        ant_device_types: &[120], // heart_rate monitor
+        known_manufacturers: &[],
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -623,7 +628,20 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                             }
                         }
                         "antplus_device_type" => {
-                            device.ant_device_type = value_to_u8(field.value());
+                            device.ant_device_type = value_to_u8(field.value())
+                                .or_else(|| antplus_type_from_name(
+                                    &value_to_string(field.value()).unwrap_or_default(),
+                                ));
+                        }
+                        "garmin_product" if device.product.is_none() => {
+                            // Garmin devices often lack product_name but have
+                            // garmin_product (e.g. "fenix6", "hrm_pro").
+                            // Skip numeric-only values (duplicates).
+                            if let Some(s) = value_to_string(field.value()) {
+                                if !s.chars().all(|c| c.is_ascii_digit()) {
+                                    device.product = Some(format_product_name(&s));
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -1070,10 +1088,18 @@ fn resolve_merge(records: &mut [RecordRow]) -> u8 {
 }
 
 /// Find the hardware device that matches an ANT+ device type.
+/// Skips the creator device (device_index == 0).
+/// When multiple devices match, prefer the one with the highest device_index.
 fn find_device_by_ant_type(devices: &[DeviceMeta], ant_types: &[u8]) -> Option<usize> {
     devices
         .iter()
-        .position(|d| d.ant_device_type.is_some_and(|t| ant_types.contains(&t)))
+        .enumerate()
+        .filter(|(_, d)| {
+            d.device_index != Some(0)
+                && d.ant_device_type.is_some_and(|t| ant_types.contains(&t))
+        })
+        .max_by_key(|(_, d)| d.device_index.unwrap_or(0))
+        .map(|(i, _)| i)
 }
 
 /// Find a hardware device whose manufacturer is known to produce this metric.
@@ -1120,10 +1146,20 @@ fn attribute_devices(
             for sensor in &mut sensors {
                 sensor.columns.retain(|c| c != col.name);
             }
-            // Three-tier fallback: ANT+ device type → known manufacturer → creator.
-            let device_idx = find_device_by_ant_type(&devices, col.ant_device_types)
-                .or_else(|| find_device_by_manufacturer(&devices, col.known_manufacturers))
-                .or_else(|| find_creator_device(&devices));
+            // Find the best device: consider both ANT+ type and known manufacturer,
+            // preferring the one with the highest device_index (most recently
+            // registered, most likely the active source in multi-sport sessions).
+            let ant_match = find_device_by_ant_type(&devices, col.ant_device_types);
+            let mfr_match = find_device_by_manufacturer(&devices, col.known_manufacturers);
+            let device_idx = match (ant_match, mfr_match) {
+                (Some(a), Some(m)) if a != m => {
+                    let a_idx = devices[a].device_index.unwrap_or(0);
+                    let m_idx = devices[m].device_index.unwrap_or(0);
+                    Some(if m_idx > a_idx { m } else { a })
+                }
+                (a, m) => a.or(m),
+            }
+            .or_else(|| find_creator_device(&devices));
             if let Some(idx) = device_idx {
                 if !devices[idx].columns.contains(&col.name.to_string()) {
                     devices[idx].columns.push(col.name.to_string());
@@ -1136,6 +1172,41 @@ fn attribute_devices(
     sensors.retain(|s| !s.columns.is_empty());
 
     (devices, sensors)
+}
+
+/// Deduplicate devices by device_index, merging information from re-emitted
+/// DeviceInfo messages.  FIT files often emit DeviceInfo multiple times for the
+/// same device (e.g. at start and end of activity).  Later emissions may carry
+/// fields (like ANT+ device type) that earlier ones lack.
+fn dedup_devices(devices: &[DeviceMeta]) -> Vec<DeviceMeta> {
+    let mut by_index: Vec<(u8, DeviceMeta)> = Vec::new();
+    for d in devices {
+        let idx = match d.device_index {
+            Some(i) => i,
+            None => {
+                by_index.push((u8::MAX, d.clone()));
+                continue;
+            }
+        };
+        if let Some(existing) = by_index.iter_mut().find(|(i, _)| *i == idx) {
+            // Merge: prefer non-None values from later emission.
+            if existing.1.manufacturer.is_none() {
+                existing.1.manufacturer = d.manufacturer.clone();
+            }
+            if existing.1.product.is_none() {
+                existing.1.product = d.product.clone();
+            }
+            if existing.1.serial_number.is_none() {
+                existing.1.serial_number = d.serial_number.clone();
+            }
+            if existing.1.ant_device_type.is_none() {
+                existing.1.ant_device_type = d.ant_device_type;
+            }
+        } else {
+            by_index.push((idx, d.clone()));
+        }
+    }
+    by_index.into_iter().map(|(_, d)| d).collect()
 }
 
 /// Split a flat list of DeviceInfo entries into per-session groups.
@@ -1194,8 +1265,9 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
         // Single session (or no sessions): merge across all records.
         let dev_won = resolve_merge(&mut parsed.records);
         let batch = build_batch(&parsed.records, &parsed.extra_col_info, &parsed.extra_data)?;
+        let deduped = dedup_devices(&parsed.devices);
         let (devices, sensors) =
-            attribute_devices(&parsed.devices, &parsed.developer_sensors, dev_won);
+            attribute_devices(&deduped, &parsed.developer_sensors, dev_won);
 
         activities.append(build_activity_dict(
             py,
@@ -1235,8 +1307,9 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             let session_batch = build_batch(session_records, &[], &[])?;
             let full_batch = merge_fixed_with_extras(&session_batch, &batch.slice(first, len))?;
 
+            let deduped = dedup_devices(&device_groups[si]);
             let (devices, sensors) =
-                attribute_devices(&device_groups[si], &parsed.developer_sensors, dev_won);
+                attribute_devices(&deduped, &parsed.developer_sensors, dev_won);
 
             activities.append(build_activity_dict(
                 py,
@@ -1355,6 +1428,28 @@ fn sport_name(v: u8) -> &'static str {
         37 => "stand_up_paddleboarding", 38 => "surfing", 53 => "diving",
         _ => "unknown",
     }
+}
+
+/// Map ANT+ device type string names back to numeric codes.
+/// The fitparser crate decodes these from the FIT profile.
+fn antplus_type_from_name(name: &str) -> Option<u8> {
+    match name {
+        "heart_rate" => Some(120),
+        "bike_speed_cadence" => Some(121),
+        "bike_cadence" => Some(122),
+        "bike_speed" => Some(123),
+        "bike_power" => Some(11),
+        "stride_speed_distance" => Some(124),
+        _ => None,
+    }
+}
+
+/// Clean a raw product name like "fenix6" or "hrm_pro" by replacing
+/// underscores and hyphens with spaces.  Preserves original casing.
+fn format_product_name(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c == '_' || c == '-' { ' ' } else { c })
+        .collect()
 }
 
 /// Map FIT manufacturer IDs to names.  Derived from the FIT SDK profile.

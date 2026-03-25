@@ -12,12 +12,19 @@ class TestDeveloperSensorDetection:
         assert stryd is not None
 
     def test_stryd_has_columns(self, dev_fields_path):
-        devices = Activity.load_fit(dev_fields_path).metadata.devices
+        devices = Activity.load_fit(dev_fields_path, columns="all").metadata.devices
         stryd = next(d for d in devices if d.manufacturer == "stryd")
         assert "power" in stryd.columns
         assert "form_power" in stryd.columns
         assert "air_power" in stryd.columns
         assert "leg_spring_stiffness" in stryd.columns
+
+    def test_stryd_columns_filtered_by_default(self, dev_fields_path):
+        """With default column selection, only standard columns appear."""
+        devices = Activity.load_fit(dev_fields_path).metadata.devices
+        stryd = next(d for d in devices if d.manufacturer == "stryd")
+        assert "power" in stryd.columns
+        assert "form_power" not in stryd.columns
 
     def test_stryd_merged_with_device_info(self, dev_fields_path):
         """Stryd appears in both DeviceInfo and developer fields — should be one device."""
@@ -33,7 +40,7 @@ class TestDeveloperSensorDetection:
         assert core is not None
 
     def test_core_has_columns(self, dev_fields_path):
-        devices = Activity.load_fit(dev_fields_path).metadata.devices
+        devices = Activity.load_fit(dev_fields_path, columns="all").metadata.devices
         core = next(d for d in devices if d.manufacturer == "core")
         assert "core_temperature" in core.columns
         assert "skin_temperature" in core.columns
@@ -67,13 +74,13 @@ class TestColumnSource:
         assert source.manufacturer == "stryd"
 
     def test_core_temperature_from_core(self, dev_fields_path):
-        meta = Activity.load_fit(dev_fields_path).metadata
+        meta = Activity.load_fit(dev_fields_path, columns="all").metadata
         source = meta.column_source("core_temperature")
         assert source is not None
         assert source.manufacturer == "core"
 
     def test_form_power_from_stryd(self, dev_fields_path):
-        meta = Activity.load_fit(dev_fields_path).metadata
+        meta = Activity.load_fit(dev_fields_path, columns="all").metadata
         source = meta.column_source("form_power")
         assert source is not None
         assert source.manufacturer == "stryd"
@@ -83,7 +90,7 @@ class TestColumnSource:
         assert meta.column_source("nonexistent") is None
 
     def test_skin_temperature_from_core(self, dev_fields_path):
-        meta = Activity.load_fit(dev_fields_path).metadata
+        meta = Activity.load_fit(dev_fields_path, columns="all").metadata
         source = meta.column_source("skin_temperature")
         assert source is not None
         assert source.manufacturer == "core"
@@ -215,11 +222,11 @@ class TestParquetSensorRoundtrip:
     """Verify sensor info survives Parquet serialization."""
 
     def test_columns_preserved(self, dev_fields_path, tmp_path):
-        original = Activity.load_fit(dev_fields_path)
+        original = Activity.load_fit(dev_fields_path, columns="all")
         pq_path = tmp_path / "test.parquet"
         original.to_parquet(pq_path)
 
-        loaded = Activity.load_parquet(pq_path)
+        loaded = Activity.load_parquet(pq_path, columns="all")
         stryd = next(d for d in loaded.metadata.devices if d.manufacturer == "stryd")
         assert "power" in stryd.columns
         assert "form_power" in stryd.columns

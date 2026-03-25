@@ -12,6 +12,13 @@ Source = str | os.PathLike[str] | bytes | BinaryIO
 PathSource = str | os.PathLike[str]
 
 
+def _filter_device_columns(meta: ActivityMetadata, data: pa.Table) -> None:
+    """Trim device.columns to only include columns present in the data table."""
+    available = set(data.column_names)
+    for device in meta.devices:
+        device.columns = [c for c in device.columns if c in available]
+
+
 class Activity:
     """A single parsed activity with data and metadata.
 
@@ -61,6 +68,7 @@ class Activity:
 
         data, file_meta = load_fit(source, metadata=metadata)
         data = select_columns(data, columns, extra_columns, missing)
+        _filter_device_columns(file_meta, data)
         return cls(data, file_meta)
 
     @classmethod
@@ -77,7 +85,9 @@ class Activity:
 
         data, file_meta = read_parquet(source)
         data = select_columns(data, columns, extra_columns, missing)
-        return cls(data, merge_metadata(file_meta, metadata))
+        meta = merge_metadata(file_meta, metadata)
+        _filter_device_columns(meta, data)
+        return cls(data, meta)
 
     @classmethod
     def load_csv(
@@ -93,7 +103,9 @@ class Activity:
 
         data, inferred = read_csv(source)
         data = select_columns(data, columns, extra_columns, missing)
-        return cls(data, merge_metadata(inferred, metadata))
+        meta = merge_metadata(inferred, metadata)
+        _filter_device_columns(meta, data)
+        return cls(data, meta)
 
     # -- Lazy loaders ----------------------------------------------------------
 
@@ -120,7 +132,9 @@ class Activity:
 
         def loader() -> pa.Table:
             data, _ = load_fit(resolved)
-            return select_columns(data, columns, extra_columns, missing)
+            data = select_columns(data, columns, extra_columns, missing)
+            _filter_device_columns(file_meta, data)
+            return data
 
         return cls(None, file_meta, _loader=loader)
 
@@ -143,7 +157,9 @@ class Activity:
 
         def loader() -> pa.Table:
             data, _ = read_parquet(resolved)
-            return select_columns(data, columns, extra_columns, missing)
+            data = select_columns(data, columns, extra_columns, missing)
+            _filter_device_columns(merged, data)
+            return data
 
         return cls(None, merged, _loader=loader)
 
