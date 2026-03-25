@@ -84,6 +84,7 @@ FIT files are a mess. `enhanced_speed` vs `speed`, semicircle-encoded GPS, manuf
 | `speed` | `Float32` | m/s, normalized from `enhanced_speed` variants |
 | `position_lat` | `Float64` | Degrees, converted from semicircles. Sub-meter precision. |
 | `position_long` | `Float64` | |
+| `lap` | `Int16` | 0-based lap index, from FIT Lap messages |
 
 These types are native across the ecosystem, no casting, no surprises:
 
@@ -92,6 +93,35 @@ These types are native across the ecosystem, no casting, no surprises:
 import duckdb
 duckdb.from_arrow(activity.data).filter("power > 300").fetchdf()
 ```
+
+---
+
+## Laps
+
+Pyroparse parses FIT Lap messages and assigns a `lap` index to every record row. The `lap` column is included by default — use it for per-lap analysis with any tool:
+
+```python
+import polars as pl
+import pyroparse as pp
+
+activity = pp.Activity.load_fit("intervals.fit")
+df = pl.from_arrow(activity.data)
+df.group_by("lap").agg(pl.col("power").mean(), pl.col("heart_rate").mean())
+```
+
+The `lap_trigger` column tells you what ended each lap — useful for distinguishing manual presses from auto-laps:
+
+```python
+activity = pp.Activity.load_fit("ride.fit", extra_columns=["lap_trigger"])
+df = pl.from_arrow(activity.data)
+
+# Find laps the user deliberately marked (ignoring auto-lap noise)
+manual_laps = df.filter(pl.col("lap_trigger") == "manual")["lap"].unique()
+```
+
+Trigger values come directly from the FIT SDK: `"manual"`, `"distance"`, `"time"`, `"session_end"`, `"fitness_equipment"`, `"position_start"`, `"position_lap"`, `"position_waypoint"`, `"position_marked"`. The trigger describes what **ended** the lap — so a lap closed by pressing the lap button has `lap_trigger="manual"`.
+
+Files without Lap messages get `lap=0` for all rows. `lap_trigger` is omitted entirely when no laps are present.
 
 ---
 

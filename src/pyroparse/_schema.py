@@ -17,6 +17,7 @@ STANDARD_COLUMNS = [
     "altitude",
     "temperature",
     "distance",
+    "lap",
 ]
 
 _STANDARD_COLUMNS_SET = frozenset(STANDARD_COLUMNS)
@@ -34,6 +35,8 @@ _CANONICAL_TYPES: dict[str, pa.DataType] = {
     "altitude": pa.float32(),
     "temperature": pa.int8(),
     "distance": pa.float64(),
+    "lap": pa.int16(),
+    "lap_trigger": pa.utf8(),
     "core_temperature": pa.float32(),
     "smo2": pa.float32(),
 }

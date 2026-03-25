@@ -155,8 +155,8 @@ class TestConstant:
     def test_is_list(self):
         assert isinstance(pp.STANDARD_COLUMNS, list)
 
-    def test_has_10_columns(self):
-        assert len(pp.STANDARD_COLUMNS) == 10
+    def test_has_11_columns(self):
+        assert len(pp.STANDARD_COLUMNS) == 11
 
     def test_timestamp_first(self):
         assert pp.STANDARD_COLUMNS[0] == "timestamp"

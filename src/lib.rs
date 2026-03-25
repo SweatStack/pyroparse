@@ -319,7 +319,7 @@ fn normalize_field_name(name: &str) -> String {
     result
 }
 
-/// The 10 standard columns + 2 canonical extras — none of these are added to
+/// The 11 standard columns + canonical extras — none of these are added to
 /// the dynamic extras discovered from the file.
 fn is_canonical_column(name: &str) -> bool {
     matches!(
@@ -334,6 +334,8 @@ fn is_canonical_column(name: &str) -> bool {
             | "altitude"
             | "temperature"
             | "distance"
+            | "lap"
+            | "lap_trigger"
             | "core_temperature"
             | "smo2"
     )
@@ -558,6 +560,13 @@ struct DeviceMeta {
     columns: Vec<String>,
 }
 
+/// A lap boundary extracted from a FIT Lap message.
+struct LapBoundary {
+    start_time_us: i64,
+    end_time_us: i64,
+    trigger: Option<String>,
+}
+
 struct ParseResult {
     records: Vec<RecordRow>,
     extra_col_info: Vec<(String, DataType)>,
@@ -567,6 +576,7 @@ struct ParseResult {
     /// groups using `split_devices_per_session` before building output.
     devices: Vec<DeviceMeta>,
     developer_sensors: Vec<DeveloperSensor>,
+    laps: Vec<LapBoundary>,
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +586,7 @@ struct ParseResult {
 fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
     let mut sessions = Vec::new();
     let mut devices = Vec::new();
+    let mut laps = Vec::new();
     // Temporal tracking: most recent DeveloperDataId UUID per index.
     let mut current_app_for_idx: BTreeMap<u8, String> = BTreeMap::new();
     // field_name → owning app UUID (set when FieldDescription follows DeveloperDataId).
@@ -717,6 +728,26 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
                     }
                 }
             }
+            MesgNum::Lap => {
+                let mut start_time_us: Option<i64> = None;
+                let mut end_time_us: Option<i64> = None;
+                let mut trigger: Option<String> = None;
+                for field in msg.fields() {
+                    match field.name() {
+                        "start_time" => start_time_us = value_to_timestamp_us(field.value()),
+                        "timestamp" => end_time_us = value_to_timestamp_us(field.value()),
+                        "lap_trigger" => trigger = value_to_string(field.value()),
+                        _ => {}
+                    }
+                }
+                if let (Some(start), Some(end)) = (start_time_us, end_time_us) {
+                    laps.push(LapBoundary {
+                        start_time_us: start,
+                        end_time_us: end,
+                        trigger,
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -803,6 +834,9 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
         row_idx += 1;
     }
 
+    // Sort laps by start_time for binary search in lap assignment.
+    laps.sort_by_key(|l| l.start_time_us);
+
     ParseResult {
         records,
         extra_col_info,
@@ -810,6 +844,7 @@ fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
         sessions,
         devices,
         developer_sensors,
+        laps,
     }
 }
 
@@ -846,10 +881,58 @@ fn promote_type(a: &DataType, b: &DataType) -> DataType {
     }
 }
 
+/// Assign lap index and trigger to each record based on lap boundaries.
+///
+/// Returns (lap_indices, lap_triggers) — one entry per record row.
+/// If `laps` is empty, all records get lap=0 and trigger=None.
+fn assign_laps(
+    records: &[RecordRow],
+    laps: &[LapBoundary],
+) -> (Vec<i16>, Vec<Option<String>>) {
+    let n = records.len();
+    if laps.is_empty() {
+        return (vec![0i16; n], vec![None; n]);
+    }
+
+    let mut lap_indices = Vec::with_capacity(n);
+    let mut lap_triggers: Vec<Option<String>> = Vec::with_capacity(n);
+
+    // Check if any records fall before the first lap boundary.
+    let first_lap_start = laps[0].start_time_us;
+    let has_pre_lap_records = records.iter().any(|r| {
+        r.timestamp.is_some_and(|ts| ts < first_lap_start)
+    });
+    // When records exist before the first lap, they get a synthetic lap 0
+    // and all real laps shift up by 1.
+    let offset: i16 = if has_pre_lap_records { 1 } else { 0 };
+
+    for record in records {
+        let ts = record.timestamp.unwrap_or(0);
+
+        if ts < first_lap_start {
+            // Record before any lap boundary — synthetic lap 0.
+            lap_indices.push(0);
+            lap_triggers.push(None);
+            continue;
+        }
+
+        // Binary search: find the last lap whose start_time <= record timestamp.
+        let lap_pos = laps.partition_point(|l| l.start_time_us <= ts);
+        // partition_point returns the first index where start_time > ts,
+        // so the containing lap is at lap_pos - 1.
+        let lap_idx = if lap_pos > 0 { lap_pos - 1 } else { 0 };
+        lap_indices.push(lap_idx as i16 + offset);
+        lap_triggers.push(laps[lap_idx].trigger.clone());
+    }
+
+    (lap_indices, lap_triggers)
+}
+
 fn build_batch(
     records: &[RecordRow],
     extra_col_info: &[(String, DataType)],
     extra_data: &[TypedColumn],
+    laps: &[LapBoundary],
 ) -> PyResult<RecordBatch> {
     // Schema: 12 fixed columns, then extras alphabetically.
     // Canonical extras from RecordRow (core_temperature, smo2) — only include
@@ -870,7 +953,11 @@ fn build_batch(
         ));
     }
 
-    // Schema: 10 standard columns, then all extras sorted alphabetically.
+    // Compute lap assignment.
+    let (lap_indices, lap_triggers) = assign_laps(records, laps);
+    let has_lap_triggers = lap_triggers.iter().any(|t| t.is_some());
+
+    // Schema: 11 standard columns, then all extras sorted alphabetically.
     let mut fields = vec![
         Field::new(
             "timestamp",
@@ -886,7 +973,17 @@ fn build_batch(
         Field::new("altitude", DataType::Float32, true),
         Field::new("temperature", DataType::Int8, true),
         Field::new("distance", DataType::Float64, true),
+        Field::new("lap", DataType::Int16, true),
     ];
+
+    // Include lap_trigger as a canonical extra if the file has lap data.
+    if has_lap_triggers {
+        let trigger_arr: StringArray = lap_triggers.iter().map(|t| t.as_deref()).collect();
+        canonical_extras.push((
+            "lap_trigger".into(),
+            Arc::new(trigger_arr),
+        ));
+    }
 
     // Merge canonical extras and dynamic extras into one sorted list.
     let mut all_extras: Vec<(&str, &DataType, Option<&Arc<dyn arrow::array::Array>>)> = Vec::new();
@@ -924,6 +1021,7 @@ fn build_batch(
             records.iter().map(|r| r.temperature),
         )),
         Arc::new(Float64Array::from_iter(records.iter().map(|r| r.distance))),
+        Arc::new(Int16Array::from(lap_indices)),
     ];
     let mut extra_data_idx = 0;
     for &(_, _, canonical_arr) in &all_extras {
@@ -952,7 +1050,7 @@ fn detect_metrics(batch: &RecordBatch) -> Vec<String> {
     let has_data = |i: usize| batch.column(i).null_count() < n;
 
     // Standard columns: 0=timestamp 1=hr 2=power 3=cadence 4=speed
-    //   5=latitude 6=longitude 7=altitude 8=temperature 9=distance
+    //   5=latitude 6=longitude 7=altitude 8=temperature 9=distance 10=lap
     if has_data(1) { metrics.push("heart_rate".into()); }
     if has_data(2) { metrics.push("power".into()); }
     if has_data(4) { metrics.push("speed".into()); }
@@ -961,13 +1059,18 @@ fn detect_metrics(batch: &RecordBatch) -> Vec<String> {
     if has_data(7) { metrics.push("altitude".into()); }
     if has_data(8) { metrics.push("temperature".into()); }
     if has_data(9) { metrics.push("distance".into()); }
+    // Skip index 10 (lap) — it's structural, not a metric.
 
-    // Extra columns (indices 10+), includes canonical extras like
-    // core_temperature and smo2 alongside dynamic extras.
+    // Extra columns (indices 11+), includes canonical extras like
+    // core_temperature, smo2, and lap_trigger alongside dynamic extras.
     let schema = batch.schema();
-    for i in 10..batch.num_columns() {
+    for i in 11..batch.num_columns() {
         if has_data(i) {
-            metrics.push(schema.field(i).name().clone());
+            let name = schema.field(i).name();
+            // lap_trigger is structural, not a metric.
+            if name != "lap_trigger" {
+                metrics.push(name.clone());
+            }
         }
     }
 
@@ -1312,7 +1415,9 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
     if parsed.sessions.len() <= 1 {
         // Single session (or no sessions): merge across all records.
         let dev_won = resolve_merge(&mut parsed.records);
-        let batch = build_batch(&parsed.records, &parsed.extra_col_info, &parsed.extra_data)?;
+        let batch = build_batch(
+            &parsed.records, &parsed.extra_col_info, &parsed.extra_data, &parsed.laps,
+        )?;
         let metrics = detect_metrics(&batch);
         let deduped = dedup_devices(&parsed.devices);
         let (devices, sensors) =
@@ -1327,7 +1432,10 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
         )?)?;
     } else {
         // Multi-session: slice records per session, merge each independently.
-        let batch = build_batch(&parsed.records, &parsed.extra_col_info, &parsed.extra_data)?;
+        // Build full batch with all laps for the extras columns.
+        let batch = build_batch(
+            &parsed.records, &parsed.extra_col_info, &parsed.extra_data, &parsed.laps,
+        )?;
         let device_groups =
             split_devices_per_session(&parsed.devices, parsed.sessions.len());
 
@@ -1347,13 +1455,24 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
                 .unwrap_or(first);
             let len = last.saturating_sub(first);
 
+            // Filter laps to this session's time range and re-index from 0.
+            let session_laps: Vec<LapBoundary> = parsed.laps
+                .iter()
+                .filter(|l| l.start_time_us >= start && l.start_time_us <= end)
+                .map(|l| LapBoundary {
+                    start_time_us: l.start_time_us,
+                    end_time_us: l.end_time_us,
+                    trigger: l.trigger.clone(),
+                })
+                .collect();
+
             // Resolve merge on a mutable slice of this session's records.
             let session_records = &mut parsed.records[first..first + len];
             let dev_won = resolve_merge(session_records);
 
             // Rebuild fixed columns (+ canonical extras) from the now-resolved
             // records.  Dynamic extras come from the pre-built batch via slice.
-            let session_batch = build_batch(session_records, &[], &[])?;
+            let session_batch = build_batch(session_records, &[], &[], &session_laps)?;
             let full_batch = merge_fixed_with_extras(&session_batch, &batch.slice(first, len))?;
 
             let metrics = detect_metrics(&full_batch);
@@ -1375,13 +1494,13 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
     Ok(result.into_any().unbind())
 }
 
-/// Combine fixed columns (0..10) from `fixed_source` with extra columns (10+)
+/// Combine fixed columns (0..11) from `fixed_source` with extra columns (11+)
 /// from `extras_source` into a single RecordBatch.
 fn merge_fixed_with_extras(
     fixed_source: &RecordBatch,
     extras_source: &RecordBatch,
 ) -> PyResult<RecordBatch> {
-    let n_fixed = 10;
+    let n_fixed = 11;
     let mut fields: Vec<Field> = Vec::new();
     let mut arrays: Vec<Arc<dyn arrow::array::Array>> = Vec::new();
 

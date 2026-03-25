@@ -79,7 +79,7 @@ class TestExtraColumns:
     def test_default_returns_only_standard(self, dev_fields_path):
         """Default load returns standard columns, not extras."""
         data = Activity.load_fit(dev_fields_path).data
-        assert data.num_columns == 10
+        assert data.num_columns == len(STANDARD_COLUMNS)
 
     def test_extra_columns_parameter(self, dev_fields_path):
         """extra_columns adds specific extras alongside standard."""
