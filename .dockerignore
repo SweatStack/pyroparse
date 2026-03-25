@@ -1,5 +1,9 @@
 .venv
 .git
+.claude
+.agents
+.pytest_cache
+.DS_Store
 target
 __pycache__
 *.py[oc]
@@ -8,5 +12,12 @@ dist
 wheels
 *.egg-info
 tests
-PLAN.md
-INTERFACE.md
+data
+docs
+plans
+scripts
+BENCHMARK*.md
+Makefile
+uv.lock
+skills-lock.json
+.python-version
