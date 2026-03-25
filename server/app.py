@@ -38,9 +38,10 @@ def _write_table(table: pa.Table, fmt: str) -> bytes:
     return buf.getvalue()
 
 
-def _activity_filename(index: int, activity: Activity, ext: str) -> str:
-    sport = (activity.metadata.sport or "unknown").replace(".", "_")
-    return f"{index}_{sport}.{ext}"
+def _activity_filename(stem: str, index: int, ext: str, multi: bool) -> str:
+    if multi:
+        return f"{stem}_{index}_pyroparse.{ext}"
+    return f"{stem}_pyroparse.{ext}"
 
 
 async def index(_request: Request) -> HTMLResponse:
@@ -74,24 +75,28 @@ async def convert(request: Request) -> Response:
     # Single file response (no allow_multi flag).
     if not allow_multi:
         table = select_columns(activities[0].data, columns)
+        filename = _activity_filename(stem, 0, ext, multi=False)
         content_type = "text/csv" if fmt == "csv" else "application/octet-stream"
         return Response(
             content=_write_table(table, fmt),
             media_type=content_type,
-            headers={"Content-Disposition": f'attachment; filename="{stem}.{ext}"'},
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    # Zip response.
+    # Zip response (always include index for predictable parsing).
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for i, act in enumerate(activities):
             table = select_columns(act.data, columns)
-            zf.writestr(_activity_filename(i, act, ext), _write_table(table, fmt))
+            zf.writestr(
+                _activity_filename(stem, i, ext, multi=True),
+                _write_table(table, fmt),
+            )
 
     return Response(
         content=zip_buf.getvalue(),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{stem}.zip"'},
+        headers={"Content-Disposition": f'attachment; filename="{stem}_pyroparse.zip"'},
     )
 
 
