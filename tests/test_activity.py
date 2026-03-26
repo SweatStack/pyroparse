@@ -112,18 +112,12 @@ class TestRepr:
 
 
 class TestReadFit:
-    def test_returns_table(self, fit_path):
+    def test_read_fit_table_and_schema(self, fit_path):
         table = pyroparse.read_fit(fit_path)
         assert isinstance(table, pa.Table)
-
-    def test_row_count(self, fit_path):
-        table = pyroparse.read_fit(fit_path)
         assert table.num_rows == 21_666
-
-    def test_schema_types(self, fit_path):
-        schema = pyroparse.read_fit(fit_path).schema
-        assert schema.field("timestamp").type == pa.timestamp("us", tz="UTC")
-        assert schema.field("heart_rate").type == pa.int16()
+        assert table.schema.field("timestamp").type == pa.timestamp("us", tz="UTC")
+        assert table.schema.field("heart_rate").type == pa.int16()
 
     def test_accepts_string_path(self, fit_path):
         table = pyroparse.read_fit(str(fit_path))
@@ -131,38 +125,24 @@ class TestReadFit:
 
 
 class TestOpenFit:
-    def test_returns_activity(self, fit_path):
-        assert isinstance(Activity.open_fit(fit_path), Activity)
-
-    def test_metadata_sport(self, fit_path):
-        assert Activity.open_fit(fit_path).metadata.sport == "cycling.road"
-
-    def test_metadata_start_time(self, fit_path):
-        meta = Activity.open_fit(fit_path).metadata
+    def test_metadata_properties(self, fit_path):
+        """open_fit returns Activity with correct metadata."""
+        activity = Activity.open_fit(fit_path)
+        assert isinstance(activity, Activity)
+        meta = activity.metadata
+        assert meta.sport == "cycling.road"
         assert meta.start_time is not None
         assert meta.start_time.tzinfo is not None
-
-    def test_metadata_duration(self, fit_path):
-        meta = Activity.open_fit(fit_path).metadata
         assert meta.duration is not None
         assert meta.duration > 0
-
-    def test_metadata_distance(self, fit_path):
-        meta = Activity.open_fit(fit_path).metadata
         assert meta.distance is not None
         assert meta.distance > 0
-
-    def test_metadata_metrics(self, fit_path):
-        metrics = Activity.open_fit(fit_path).metadata.metrics
-        assert metrics >= {"heart_rate", "power", "speed", "cadence", "gps"}
+        assert meta.metrics >= {"heart_rate", "power", "speed", "cadence", "gps"}
 
     def test_data_loads_on_access(self, fit_path):
         activity = Activity.open_fit(fit_path)
         assert activity.data.num_rows == 21_666
-
-    def test_data_has_correct_schema(self, fit_path):
-        schema = Activity.open_fit(fit_path).data.schema
-        assert schema.field("timestamp").type == pa.timestamp("us", tz="UTC")
+        assert activity.data.schema.field("timestamp").type == pa.timestamp("us", tz="UTC")
 
     def test_metadata_override(self, fit_path):
         activity = Activity.open_fit(fit_path, metadata={"sport": "gravel"})
@@ -181,19 +161,19 @@ class TestOpenFit:
 
 
 class TestOpenParquet:
-    @pytest.fixture()
-    def parquet_path(self, fit_path, tmp_path):
-        Activity.load_fit(fit_path).to_parquet(tmp_path / "test.parquet")
-        return tmp_path / "test.parquet"
+    @pytest.fixture(scope="class")
+    def parquet_path(self, tmp_path_factory):
+        from pathlib import Path
+        fit = Path(__file__).parent / "fixtures" / "test.fit"
+        tmp = tmp_path_factory.mktemp("open_parquet")
+        Activity.load_fit(fit).to_parquet(tmp / "test.parquet")
+        return tmp / "test.parquet"
 
-    def test_returns_activity(self, parquet_path):
-        assert isinstance(Activity.open_parquet(parquet_path), Activity)
-
-    def test_metadata_sport(self, parquet_path):
-        assert Activity.open_parquet(parquet_path).metadata.sport == "cycling.road"
-
-    def test_data_loads_on_access(self, parquet_path):
-        assert Activity.open_parquet(parquet_path).data.num_rows == 21_666
+    def test_activity_and_metadata(self, parquet_path):
+        activity = Activity.open_parquet(parquet_path)
+        assert isinstance(activity, Activity)
+        assert activity.metadata.sport == "cycling.road"
+        assert activity.data.num_rows == 21_666
 
     def test_metadata_override(self, parquet_path):
         activity = Activity.open_parquet(parquet_path, metadata={"sport": "gravel"})
@@ -204,14 +184,9 @@ class TestOpenParquet:
 
 
 class TestSessionOpenFit:
-    def test_returns_session(self, fit_path):
-        assert isinstance(Session.open_fit(fit_path), Session)
-
-    def test_single_activity(self, fit_path):
-        assert len(Session.open_fit(fit_path).activities) == 1
-
-    def test_metadata_available(self, fit_path):
-        assert Session.open_fit(fit_path).activities[0].metadata.sport == "cycling.road"
-
-    def test_data_loads_on_access(self, fit_path):
-        assert Session.open_fit(fit_path).activities[0].data.num_rows == 21_666
+    def test_session_open_fit_metadata_and_data(self, fit_path):
+        session = Session.open_fit(fit_path)
+        assert isinstance(session, Session)
+        assert len(session.activities) == 1
+        assert session.activities[0].metadata.sport == "cycling.road"
+        assert session.activities[0].data.num_rows == 21_666

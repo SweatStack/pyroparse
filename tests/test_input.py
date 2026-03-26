@@ -7,14 +7,11 @@ from pyroparse import Activity
 
 
 class TestLoadFitFromBytes:
-    def test_returns_activity(self, fit_path):
-        assert isinstance(Activity.load_fit(fit_path.read_bytes()), Activity)
-
-    def test_row_count(self, fit_path):
-        assert Activity.load_fit(fit_path.read_bytes()).data.num_rows == 21_666
-
-    def test_metadata(self, fit_path):
-        assert Activity.load_fit(fit_path.read_bytes()).metadata.sport == "cycling.road"
+    def test_activity_from_bytes(self, fit_path):
+        activity = Activity.load_fit(fit_path.read_bytes())
+        assert isinstance(activity, Activity)
+        assert activity.data.num_rows == 21_666
+        assert activity.metadata.sport == "cycling.road"
 
 
 class TestLoadFitFromFileObject:
@@ -30,11 +27,10 @@ class TestLoadParquetFromBytes:
         Activity.load_fit(fit_path).to_parquet(pq_path)
         return pq_path.read_bytes()
 
-    def test_row_count(self, parquet_bytes):
-        assert Activity.load_parquet(parquet_bytes).data.num_rows == 21_666
-
-    def test_metadata(self, parquet_bytes):
-        assert Activity.load_parquet(parquet_bytes).metadata.sport == "cycling.road"
+    def test_data_and_metadata(self, parquet_bytes):
+        activity = Activity.load_parquet(parquet_bytes)
+        assert activity.data.num_rows == 21_666
+        assert activity.metadata.sport == "cycling.road"
 
 
 class TestLoadParquetFromFileObject:

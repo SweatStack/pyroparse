@@ -55,40 +55,34 @@ class TestLapTrigger:
         data = cycling_activity.data
         assert "lap_trigger" not in data.column_names
 
-    def test_available_via_extra_columns(self, fit_path):
+    def test_trigger_column_and_values(self, fit_path):
+        """lap_trigger available via extra_columns with correct values and consistency."""
         data = Activity.load_fit(fit_path, extra_columns=["lap_trigger"]).data
         assert "lap_trigger" in data.column_names
 
-    def test_available_via_columns_all(self, cycling_activity_all):
-        data = cycling_activity_all.data
-        assert "lap_trigger" in data.column_names
-
-    def test_trigger_values(self, fit_path):
-        """test.fit has manual laps + session_end."""
-        col = Activity.load_fit(fit_path, extra_columns=["lap_trigger"]).data.column(
-            "lap_trigger"
-        )
+        # trigger values: manual laps + session_end
+        col = data.column("lap_trigger")
         values = set(v for v in col.to_pylist() if v is not None)
         assert values == {"manual", "session_end"}
 
-    def test_last_lap_is_session_end(self, fit_path):
-        """The final lap should have trigger 'session_end', not hardcoded 'manual'."""
-        data = Activity.load_fit(fit_path, extra_columns=["lap_trigger"]).data
+        # last lap should have trigger 'session_end'
         max_lap = pc.max(data.column("lap")).as_py()
         mask = pc.equal(data.column("lap"), max_lap)
         triggers = set(pc.filter(data.column("lap_trigger"), mask).to_pylist())
         assert triggers == {"session_end"}
 
-    def test_trigger_consistent_within_lap(self, fit_path):
-        """All rows within a lap have the same trigger value."""
-        data = Activity.load_fit(fit_path, extra_columns=["lap_trigger"]).data
+        # all rows within a lap have the same trigger value
         laps = data.column("lap").to_pylist()
-        triggers = data.column("lap_trigger").to_pylist()
+        trigger_list = col.to_pylist()
         by_lap = {}
-        for lap, trigger in zip(laps, triggers):
+        for lap, trigger in zip(laps, trigger_list):
             by_lap.setdefault(lap, set()).add(trigger)
         for lap, trigger_set in by_lap.items():
             assert len(trigger_set) == 1, f"Lap {lap} has mixed triggers: {trigger_set}"
+
+    def test_available_via_columns_all(self, cycling_activity_all):
+        data = cycling_activity_all.data
+        assert "lap_trigger" in data.column_names
 
     def test_not_in_metrics(self, cycling_activity_all):
         """lap_trigger is structural, not a metric."""

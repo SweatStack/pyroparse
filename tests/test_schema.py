@@ -16,20 +16,17 @@ def parquet_path(fit_path, tmp_path):
 class TestDefault:
     """Default columns=None returns the 12 standard columns."""
 
-    def test_returns_standard_columns(self, fit_path):
+    def test_standard_columns_and_excludes_niche(self, fit_path):
+        """Default returns standard columns and excludes niche extras."""
         data = pp.read_fit(fit_path)
         assert data.column_names == STANDARD_COLUMNS
+        assert "core_temperature" not in data.column_names
+        assert "smo2" not in data.column_names
 
     def test_stable_schema_across_formats(self, fit_path, parquet_path):
         fit_cols = pp.Activity.load_fit(fit_path).data.column_names
         pq_cols = pp.Activity.load_parquet(parquet_path).data.column_names
         assert fit_cols == pq_cols == STANDARD_COLUMNS
-
-    def test_does_not_include_niche_columns(self, fit_path):
-        """core_temperature and smo2 are extras, not standard."""
-        data = pp.read_fit(fit_path)
-        assert "core_temperature" not in data.column_names
-        assert "smo2" not in data.column_names
 
     def test_niche_columns_available_via_all(self, dev_fields_path):
         """core_temperature and smo2 available via columns='all'."""

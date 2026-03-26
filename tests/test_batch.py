@@ -9,29 +9,18 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class TestScanFit:
-    def test_returns_table(self):
+    def test_scan_fit_table_structure_and_values(self):
+        """scan_fit returns correct table with expected columns, rows, and values."""
         result = pp.scan_fit(str(FIXTURES))
         assert isinstance(result, pa.Table)
-
-    def test_finds_all_fit_files(self):
-        result = pp.scan_fit(str(FIXTURES))
         assert result.num_rows == 2
-
-    def test_catalog_columns(self):
-        result = pp.scan_fit(str(FIXTURES))
         expected = [
             "file_path", "sport", "name", "start_time", "start_time_local",
             "duration", "distance", "metrics", "device_name", "device_type",
         ]
         assert result.column_names == expected
-
-    def test_sport_values(self):
-        result = pp.scan_fit(str(FIXTURES))
         sports = set(result.column("sport").to_pylist())
         assert "cycling.road" in sports or "cycling" in sports
-
-    def test_file_paths_are_absolute(self):
-        result = pp.scan_fit(str(FIXTURES))
         for path in result.column("file_path").to_pylist():
             assert Path(path).is_absolute()
 
@@ -68,27 +57,16 @@ class TestScanParquet:
         activity2 = pp.Activity.load_fit(dev_path)
         activity2.to_parquet(self.pq_dir / "dev.parquet")
 
-    def test_returns_table(self):
+    def test_scan_parquet_table_structure_and_values(self):
+        """scan_parquet returns correct table with expected schema and values."""
         result = pp.scan_parquet(str(self.pq_dir))
         assert isinstance(result, pa.Table)
-
-    def test_finds_all_parquet_files(self):
-        result = pp.scan_parquet(str(self.pq_dir))
         assert result.num_rows == 2
-
-    def test_same_schema_as_scan_fit(self):
-        result = pp.scan_parquet(str(self.pq_dir))
         fit_result = pp.scan_fit(str(FIXTURES))
         assert result.column_names == fit_result.column_names
         assert result.schema == fit_result.schema
-
-    def test_sport_values(self):
-        result = pp.scan_parquet(str(self.pq_dir))
         sports = set(result.column("sport").to_pylist())
         assert "cycling.road" in sports or "cycling" in sports
-
-    def test_file_paths_are_absolute(self):
-        result = pp.scan_parquet(str(self.pq_dir))
         for path in result.column("file_path").to_pylist():
             assert Path(path).is_absolute()
 
@@ -148,20 +126,12 @@ class TestScanParquet:
 
 
 class TestLoadFitBatch:
-    def test_returns_table(self):
-        paths = [str(FIXTURES / "test.fit")]
-        result = pp.load_fit_batch(paths)
-        assert isinstance(result, pa.Table)
-
-    def test_has_file_path_column(self):
-        paths = [str(FIXTURES / "test.fit")]
-        result = pp.load_fit_batch(paths)
-        assert "file_path" in result.column_names
-        assert result.column_names[0] == "file_path"
-
-    def test_file_path_values(self):
+    def test_single_file_table_and_file_path(self):
         path = str(FIXTURES / "test.fit")
         result = pp.load_fit_batch([path])
+        assert isinstance(result, pa.Table)
+        assert "file_path" in result.column_names
+        assert result.column_names[0] == "file_path"
         assert all(v == path for v in result.column("file_path").to_pylist())
 
     def test_multiple_files(self):
