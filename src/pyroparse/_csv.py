@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import BinaryIO
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -10,8 +9,7 @@ import pyarrow.csv as pcsv
 
 from pyroparse._metadata import ActivityMetadata
 from pyroparse._schema import GPS_COLUMNS, METRIC_COLUMNS
-
-Source = str | os.PathLike[str] | bytes | BinaryIO
+from pyroparse._types import Source
 
 
 def _resolve_source(source: Source) -> str | pa.BufferReader | BinaryIO:

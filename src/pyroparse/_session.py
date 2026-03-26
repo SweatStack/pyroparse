@@ -4,8 +4,13 @@ import os
 
 import pyarrow as pa
 
-from pyroparse._activity import Activity, _filter_device_columns
-from pyroparse._metadata import ActivityMetadata
+from pyroparse._activity import (
+    Activity,
+    _filter_device_columns,
+    _parse_multi,
+)
+from pyroparse._core import parse_fit_metadata as _parse_fit_metadata
+from pyroparse._metadata import ActivityMetadata, build_metadata
 from pyroparse._schema import select_columns
 
 
@@ -30,9 +35,7 @@ class Session:
         extra_columns: list[str] | None = None,
         missing: str = "raise",
     ) -> Session:
-        from pyroparse._fit import load_fit_multi
-
-        pairs = load_fit_multi(source)
+        pairs = _parse_multi(source)
         activities: list[Activity] = []
         for data, meta in pairs:
             data = select_columns(data, columns, extra_columns, missing)
@@ -50,10 +53,9 @@ class Session:
         missing: str = "raise",
     ) -> Session:
         """Load metadata now, defer record data until ``.data`` is accessed."""
-        from pyroparse._fit import load_fit_metadata_multi, load_fit_multi
-
-        resolved = os.fspath(path)
-        metas = load_fit_metadata_multi(resolved)
+        resolved = str(os.fspath(path))
+        raw = _parse_fit_metadata(resolved)
+        metas = [build_metadata(a["metadata"]) for a in raw["activities"]]
 
         # All activities share a single lazy parse — first .data access triggers it.
         cache: dict[int, pa.Table] = {}
@@ -61,7 +63,7 @@ class Session:
         def make_loader(idx: int, meta: ActivityMetadata):
             def loader() -> pa.Table:
                 if not cache:
-                    for i, (data, _) in enumerate(load_fit_multi(resolved)):
+                    for i, (data, _) in enumerate(_parse_multi(resolved)):
                         cache[i] = data
                 data = select_columns(cache.pop(idx), columns, extra_columns, missing)
                 _filter_device_columns(meta, data)

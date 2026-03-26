@@ -1,15 +1,26 @@
 from __future__ import annotations
 
 import os
-from typing import BinaryIO, Callable
+from typing import Callable
 
 import pyarrow as pa
 
-from pyroparse._metadata import ActivityMetadata, merge_metadata
+from pyroparse._core import parse_fit as _parse_fit
+from pyroparse._core import parse_fit_bytes as _parse_fit_bytes
+from pyroparse._core import parse_fit_metadata as _parse_fit_metadata
+from pyroparse._errors import MultipleActivitiesError
+from pyroparse._metadata import ActivityMetadata, build_metadata, merge_metadata
 from pyroparse._schema import select_columns
+from pyroparse._types import PathSource, Source
 
-Source = str | os.PathLike[str] | bytes | BinaryIO
-PathSource = str | os.PathLike[str]
+
+def _call_parser(source: Source) -> dict:
+    """Route to the path-based or bytes-based Rust parser."""
+    if isinstance(source, (str, os.PathLike)):
+        return _parse_fit(str(os.fspath(source)))
+    if isinstance(source, bytes):
+        return _parse_fit_bytes(source)
+    return _parse_fit_bytes(source.read())
 
 
 def _filter_device_columns(meta: ActivityMetadata, data: pa.Table) -> None:
@@ -64,12 +75,18 @@ class Activity:
         missing: str = "raise",
         metadata: dict | None = None,
     ) -> Activity:
-        from pyroparse._fit import load_fit
+        raw = _call_parser(source)
+        activities = raw["activities"]
+        if len(activities) > 1:
+            raise MultipleActivitiesError(len(activities))
 
-        data, file_meta = load_fit(source, metadata=metadata)
+        raw_activity = activities[0]
+        data = pa.Table.from_batches([raw_activity["records"]])
+        file_meta = build_metadata(raw_activity["metadata"])
+        meta = merge_metadata(file_meta, metadata)
         data = select_columns(data, columns, extra_columns, missing)
-        _filter_device_columns(file_meta, data)
-        return cls(data, file_meta)
+        _filter_device_columns(meta, data)
+        return cls(data, meta)
 
     @classmethod
     def load_parquet(
@@ -125,13 +142,17 @@ class Activity:
         all edge cases. Metadata values should be validated against
         ``load_fit()`` for critical workflows.
         """
-        from pyroparse._fit import load_fit, load_fit_metadata
+        resolved = str(os.fspath(path))
+        raw = _parse_fit_metadata(resolved)
+        activities = raw["activities"]
+        if len(activities) > 1:
+            raise MultipleActivitiesError(len(activities))
 
-        resolved = os.fspath(path)
-        file_meta = load_fit_metadata(resolved, metadata=metadata)
+        file_meta = build_metadata(activities[0]["metadata"])
+        file_meta = merge_metadata(file_meta, metadata)
 
         def loader() -> pa.Table:
-            data, _ = load_fit(resolved)
+            data, _ = _parse_single(resolved)
             data = select_columns(data, columns, extra_columns, missing)
             _filter_device_columns(file_meta, data)
             return data
@@ -174,3 +195,27 @@ class Activity:
 
     def __repr__(self) -> str:
         return self._metadata._repr("Activity")
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers used by both Activity and Session
+# ---------------------------------------------------------------------------
+
+def _parse_single(source: Source) -> tuple[pa.Table, ActivityMetadata]:
+    """Parse a single-activity FIT source, returning (data, metadata)."""
+    raw = _call_parser(source)
+    activities = raw["activities"]
+    if len(activities) > 1:
+        raise MultipleActivitiesError(len(activities))
+    a = activities[0]
+    data = pa.Table.from_batches([a["records"]])
+    return data, build_metadata(a["metadata"])
+
+
+def _parse_multi(source: Source) -> list[tuple[pa.Table, ActivityMetadata]]:
+    """Parse a multi-activity FIT source, returning list of (data, metadata)."""
+    raw = _call_parser(source)
+    return [
+        (pa.Table.from_batches([a["records"]]), build_metadata(a["metadata"]))
+        for a in raw["activities"]
+    ]

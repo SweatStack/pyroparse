@@ -3,15 +3,16 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
-from typing import BinaryIO
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from pyroparse._metadata import ActivityMetadata, Device
-from pyroparse._schema import METADATA_KEY, PARQUET_COMPRESSION, PARQUET_COMPRESSION_LEVEL
+from pyroparse._types import Source
 
-Source = str | os.PathLike[str] | bytes | BinaryIO
+_METADATA_KEY = b"pyroparse"
+_COMPRESSION = "zstd"
+_COMPRESSION_LEVEL = 3
 
 
 def _resolve_source(source: Source) -> str | pa.BufferReader | BinaryIO:
@@ -35,14 +36,14 @@ def write_parquet(
     """Write an activity to Parquet with metadata in the schema."""
     meta_json = _metadata_to_json(metadata)
     existing = data.schema.metadata or {}
-    combined = {**existing, METADATA_KEY: meta_json}
+    combined = {**existing, _METADATA_KEY: meta_json}
     table = data.replace_schema_metadata(combined)
     dest = str(path) if isinstance(path, (str, os.PathLike)) else path
     pq.write_table(
         table,
         dest,
-        compression=PARQUET_COMPRESSION,
-        compression_level=PARQUET_COMPRESSION_LEVEL,
+        compression=_COMPRESSION,
+        compression_level=_COMPRESSION_LEVEL,
     )
 
 
@@ -53,12 +54,12 @@ def read_parquet(
     table = pq.read_table(_resolve_source(source), columns=columns)
     schema_meta = table.schema.metadata or {}
 
-    if METADATA_KEY in schema_meta:
-        metadata = _json_to_metadata(schema_meta[METADATA_KEY])
+    if _METADATA_KEY in schema_meta:
+        metadata = _json_to_metadata(schema_meta[_METADATA_KEY])
     else:
         metadata = ActivityMetadata()
 
-    clean = {k: v for k, v in schema_meta.items() if k != METADATA_KEY}
+    clean = {k: v for k, v in schema_meta.items() if k != _METADATA_KEY}
     table = table.replace_schema_metadata(clean or None)
     return table, metadata
 
@@ -67,8 +68,8 @@ def read_parquet_metadata(path: str | os.PathLike[str]) -> ActivityMetadata:
     """Read only the Parquet schema footer — no row data loaded."""
     schema = pq.read_schema(str(os.fspath(path)))
     meta = schema.metadata or {}
-    if METADATA_KEY in meta:
-        return _json_to_metadata(meta[METADATA_KEY])
+    if _METADATA_KEY in meta:
+        return _json_to_metadata(meta[_METADATA_KEY])
     return ActivityMetadata()
 
 

@@ -74,12 +74,12 @@ src/
 ├── types.rs            # TypedColumn storage, FIT→Arrow type mapping, type promotion
 ├── reference.rs        # Lookup tables: manufacturer IDs, sport IDs, ANT+ types
 └── pyroparse/          # Python package
-    ├── __init__.py     # Public API
-    ├── _activity.py    # Activity class (eager + lazy loading)
+    ├── __init__.py     # Public API (read_fit, read_parquet, read_csv)
+    ├── _types.py       # Shared type aliases (Source, PathSource)
+    ├── _activity.py    # Activity class + FIT parsing (calls Rust directly)
     ├── _session.py     # Session class (multi-activity FIT files)
-    ├── _metadata.py    # ActivityMetadata + Device dataclasses
+    ├── _metadata.py    # ActivityMetadata, Device, build_metadata()
     ├── _schema.py      # Column definitions + selection logic
-    ├── _fit.py         # FIT parsing wrapper (calls Rust, builds metadata)
     ├── _parquet.py     # Parquet I/O with embedded metadata
     ├── _csv.py         # CSV input with metadata inference
     ├── _batch.py       # Directory scanning + batch loading

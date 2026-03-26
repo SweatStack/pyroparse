@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import os
-from typing import BinaryIO
-
 import pyarrow as pa
 
 from pyroparse._activity import Activity
@@ -14,6 +11,7 @@ from pyroparse._metadata import ActivityMetadata, Device
 from pyroparse._schema import STANDARD_COLUMNS
 from pyroparse._session import Session
 from pyroparse._sport import Sport, classify_sport
+from pyroparse._types import Source
 
 __all__ = [
     "Activity",
@@ -32,7 +30,6 @@ __all__ = [
     "scan_parquet",
 ]
 
-Source = str | os.PathLike[str] | bytes | BinaryIO
 
 
 def read_fit(

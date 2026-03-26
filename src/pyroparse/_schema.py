@@ -44,10 +44,6 @@ _CANONICAL_TYPES: dict[str, pa.DataType] = {
 METRIC_COLUMNS = {"heart_rate", "power", "cadence", "speed"}
 GPS_COLUMNS = {"latitude", "longitude"}
 
-METADATA_KEY = b"pyroparse"
-PARQUET_COMPRESSION = "zstd"
-PARQUET_COMPRESSION_LEVEL = 3
-
 
 # ---------------------------------------------------------------------------
 # Column selection

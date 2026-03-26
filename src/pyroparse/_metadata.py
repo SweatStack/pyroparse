@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields
-from datetime import datetime
+from datetime import datetime, timezone
+
+from pyroparse._sport import classify_sport
 
 
 @dataclass
@@ -95,3 +97,122 @@ def merge_metadata(
     kwargs = {f.name: getattr(base, f.name) for f in fields(base)}
     kwargs.update(overrides)
     return ActivityMetadata(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Raw Rust dict → ActivityMetadata
+# ---------------------------------------------------------------------------
+
+def build_metadata(raw: dict) -> ActivityMetadata:
+    """Construct an ActivityMetadata from the raw dict returned by Rust."""
+    start_time = None
+    if raw.get("start_time") is not None:
+        start_time = datetime.fromtimestamp(raw["start_time"], tz=timezone.utc)
+
+    start_time_local = None
+    if raw.get("start_time_local") is not None:
+        ts = datetime.fromtimestamp(raw["start_time_local"], tz=timezone.utc)
+        start_time_local = ts.replace(tzinfo=None)
+
+    hw_devices = [_device_from_raw(d) for d in raw.get("devices", [])]
+    dev_sensors = [_sensor_from_raw(s) for s in raw.get("developer_sensors", [])]
+    devices = _deduplicate_devices(_merge_devices(hw_devices, dev_sensors))
+
+    metrics = set(raw.get("metrics", []))
+    sport_raw = raw.get("sport")
+    sub_sport_raw = raw.get("sub_sport")
+
+    extra: dict = {}
+    if sub_sport_raw:
+        extra["sub_sport"] = sub_sport_raw
+
+    sport = classify_sport(sport_raw, sub_sport_raw, has_gps="gps" in metrics)
+
+    return ActivityMetadata(
+        sport=str(sport),
+        name=raw.get("name"),
+        start_time=start_time,
+        start_time_local=start_time_local,
+        duration=raw.get("duration"),
+        distance=raw.get("distance"),
+        metrics=metrics,
+        devices=devices,
+        extra=extra,
+    )
+
+
+def _device_from_raw(raw: dict) -> Device:
+    manufacturer = raw.get("manufacturer")
+    product = raw.get("product")
+    parts = [p for p in (manufacturer, product) if p]
+    name = " ".join(parts) if parts else None
+    is_creator = raw.get("device_index") == 0
+    return Device(
+        name=name,
+        manufacturer=manufacturer,
+        product=product,
+        serial_number=raw.get("serial_number"),
+        device_type="creator" if is_creator else "sensor",
+        columns=list(raw.get("columns", [])),
+    )
+
+
+def _sensor_from_raw(raw: dict) -> Device:
+    manufacturer = raw.get("manufacturer")
+    product = raw.get("product")
+    # Avoid redundant names like "concept2 Concept2" when they match.
+    if manufacturer and product and manufacturer.lower() == product.lower():
+        name = product
+    else:
+        parts = [p for p in (manufacturer, product) if p]
+        name = " ".join(parts) if parts else None
+    return Device(
+        name=name,
+        manufacturer=manufacturer,
+        product=product,
+        device_type="developer",
+        columns=list(raw.get("columns", [])),
+    )
+
+
+def _merge_devices(
+    hw_devices: list[Device], dev_sensors: list[Device]
+) -> list[Device]:
+    """Merge hardware devices with developer-field-detected sensors.
+
+    If a developer sensor matches a hardware device by manufacturer,
+    merge column lists.  Unmatched sensors are appended.
+    """
+    merged = list(hw_devices)
+    for sensor in dev_sensors:
+        found = False
+        for device in merged:
+            if device.manufacturer and device.manufacturer == sensor.manufacturer:
+                combined = list(device.columns)
+                for col in sensor.columns:
+                    if col not in combined:
+                        combined.append(col)
+                device.columns = combined
+                found = True
+                break
+        if not found:
+            merged.append(sensor)
+    return merged
+
+
+def _deduplicate_devices(devices: list[Device]) -> list[Device]:
+    """Merge re-emitted devices by serial_number or name."""
+    seen: dict[str, int] = {}
+    result: list[Device] = []
+    for d in devices:
+        key = d.serial_number or d.name or ""
+        if key and key in seen:
+            existing = result[seen[key]]
+            for col in d.columns:
+                if col not in existing.columns:
+                    existing.columns.append(col)
+            continue
+        if key:
+            seen[key] = len(result)
+        result.append(d)
+    return result
