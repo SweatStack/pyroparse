@@ -11,6 +11,8 @@ from typing import Callable
 from tqdm import tqdm
 
 from pyroparse._activity import Activity
+from pyroparse._errors import MultipleActivitiesError
+from pyroparse._session import Session
 
 # Case-insensitive glob that catches both .fit and .FIT (common on Garmin devices).
 DEFAULT_GLOB = "**/*.[fF][iI][tT]"
@@ -28,14 +30,30 @@ class ConvertResult:
         return len(self.errors) > 0
 
 
-def convert_fit_file(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> Path:
+def convert_fit_file(
+    src: str | os.PathLike[str], dst: str | os.PathLike[str],
+) -> Path | list[Path]:
     """Convert a single FIT file to Parquet.
 
-    This is the atomic building block — call it directly for one-off
-    conversions or wrap it in your own concurrency model.
+    For multi-activity files (e.g. triathlon), automatically falls back to
+    session-based parsing and writes one Parquet file per activity:
+    ``{stem}_{index}.parquet``.
+
+    Returns a single Path for single-activity files, or a list of Paths for
+    multi-activity files.
     """
     src, dst = Path(src), Path(dst)
-    activity = Activity.load_fit(src)
+    try:
+        activity = Activity.load_fit(src)
+    except MultipleActivitiesError:
+        session = Session.load_fit(src)
+        paths = []
+        for i, activity in enumerate(session.activities):
+            part = dst.with_stem(f"{dst.stem}_{i}")
+            activity.to_parquet(part)
+            paths.append(part)
+        return paths
+
     activity.to_parquet(dst)
     return dst
 
@@ -100,11 +118,17 @@ def convert_fit_tree(
 
     result = ConvertResult()
 
+    def _collect(out: Path | list[Path]) -> None:
+        if isinstance(out, list):
+            result.converted.extend(out)
+        else:
+            result.converted.append(out)
+
     # Sequential fast path — no executor overhead, clean stack traces, pdb works.
     if workers == 1:
         for s, d in tqdm(pairs, disable=not progress, desc="Converting"):
             try:
-                result.converted.append(convert(s, d))
+                _collect(convert(s, d))
             except Exception as exc:
                 result.errors.append((s, exc))
         return result
@@ -120,7 +144,7 @@ def convert_fit_tree(
         ):
             src_file = futures[future]
             try:
-                result.converted.append(future.result())
+                _collect(future.result())
             except Exception as exc:
                 result.errors.append((src_file, exc))
 

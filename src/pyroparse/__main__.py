@@ -73,11 +73,12 @@ def _cmd_convert(args: argparse.Namespace) -> int:
         if dst is None:
             dst = src.with_suffix(".parquet")
         try:
-            convert_fit_file(src, dst)
+            result = convert_fit_file(src, dst)
         except Exception as exc:
             print(f"error: {src}: {exc}", file=sys.stderr)
             return 1
-        print(f"{dst}")
+        for p in (result if isinstance(result, list) else [result]):
+            print(p)
         return 0
 
     # Directory: batch conversion.

@@ -4,10 +4,11 @@ from unittest.mock import patch
 
 import pytest
 
-from pyroparse import Activity, ConvertResult, convert_fit_file, convert_fit_tree
+from pyroparse import Activity, ConvertResult, Session, convert_fit_file, convert_fit_tree
 from pyroparse._convert import DEFAULT_GLOB
 
 FIXTURES = Path(__file__).parent / "fixtures"
+MULTI_SESSION_PATH = FIXTURES / "cycling-rowing-cycling-rowing.fit"
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +34,19 @@ class TestConvertFitFile:
         loaded = Activity.load_parquet(out)
         assert loaded.metadata.sport == original.metadata.sport
         assert loaded.metadata.start_time == original.metadata.start_time
+
+    def test_multi_activity_file(self, tmp_path):
+        out = tmp_path / "multi.parquet"
+        result = convert_fit_file(MULTI_SESSION_PATH, out)
+
+        assert isinstance(result, list)
+        session = Session.load_fit(MULTI_SESSION_PATH)
+        assert len(result) == len(session.activities)
+        for i, path in enumerate(result):
+            assert path == tmp_path / f"multi_{i}.parquet"
+            assert path.exists()
+            loaded = Activity.load_parquet(path)
+            assert loaded.data.num_rows > 0
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +146,21 @@ class TestConvertFitTree:
 
         assert not result.failed
         assert len(result.converted) == 2
+
+    def test_multi_activity_in_tree(self, fit_path, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        shutil.copy(fit_path, src / "single.fit")
+        shutil.copy(MULTI_SESSION_PATH, src / "multi.fit")
+
+        result = convert_fit_tree(src)
+
+        assert not result.failed
+        assert (src / "single.parquet").exists()
+        # Multi-activity file produces indexed outputs.
+        session = Session.load_fit(MULTI_SESSION_PATH)
+        for i in range(len(session.activities)):
+            assert (src / f"multi_{i}.parquet").exists()
 
 
 # ---------------------------------------------------------------------------
