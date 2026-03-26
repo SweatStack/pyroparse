@@ -10,7 +10,7 @@ use std::sync::Arc;
 use fields::{is_canonical_column, is_handled_field, normalize_field_name};
 use reference::{
     antplus_type_from_name, classify_developer_field, format_product_name, manufacturer_name,
-    sport_name,
+    sport_name, sub_sport_name,
 };
 use types::{fit_value_to_arrow_type, promote_type, TypedColumn};
 use values::{
@@ -1283,6 +1283,7 @@ const SESSION_START_TIME: u8 = 2;
 const SESSION_SPORT: u8 = 5;
 const SESSION_SUB_SPORT: u8 = 6;
 const SESSION_TOTAL_TIMER_TIME: u8 = 7;
+const SESSION_TOTAL_ELAPSED_TIME: u8 = 8;
 const SESSION_TOTAL_DISTANCE: u8 = 9;
 const SESSION_TIMESTAMP: u8 = 253;
 
@@ -1564,7 +1565,7 @@ impl<'a> FitScanner<'a> {
                     s.sport = Some(sport_name(data[0]).to_string());
                 }
                 SESSION_SUB_SPORT if !data.is_empty() && data[0] != 0xFF => {
-                    s.sub_sport = Some(format!("{}", data[0]));
+                    s.sub_sport = Some(sub_sport_name(data[0]).to_string());
                 }
                 SESSION_START_TIME if data.len() >= 4 => {
                     if let Some(ts) = valid_u32(data, big_endian) {
@@ -1577,7 +1578,14 @@ impl<'a> FitScanner<'a> {
                         s.end_timestamp_us = Some((ts as i64 + FIT_EPOCH_OFFSET) * 1_000_000);
                     }
                 }
-                SESSION_TOTAL_TIMER_TIME if data.len() >= 4 => {
+                SESSION_TOTAL_TIMER_TIME if data.len() >= 4 && s.duration.is_none() => {
+                    // Fallback if total_elapsed_time not present.
+                    if let Some(v) = valid_u32(data, big_endian) {
+                        s.duration = Some(v as f64 / 1000.0);
+                    }
+                }
+                SESSION_TOTAL_ELAPSED_TIME if data.len() >= 4 => {
+                    // Preferred — matches fitparser's decoded output for total_timer_time.
                     if let Some(v) = valid_u32(data, big_endian) {
                         s.duration = Some(v as f64 / 1000.0);
                     }
@@ -1990,4 +1998,5 @@ mod tests {
             assert_eq!(read_u32(&data, false), 0x12345678);
         }
     }
+
 }

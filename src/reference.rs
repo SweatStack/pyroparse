@@ -27,6 +27,43 @@ pub fn sport_name(v: u8) -> &'static str {
     }
 }
 
+pub fn sub_sport_name(v: u8) -> &'static str {
+    match v {
+        0 => "generic",
+        1 => "treadmill",
+        2 => "street",
+        3 => "trail",
+        4 => "track",
+        5 => "spin",
+        6 => "indoor_cycling",
+        7 => "road",
+        8 => "mountain",
+        9 => "downhill",
+        10 => "recumbent",
+        11 => "cyclocross",
+        12 => "hand_cycling",
+        13 => "track_cycling",
+        14 => "indoor_rowing",
+        15 => "elliptical",
+        16 => "stair_climbing",
+        17 => "lap_swimming",
+        18 => "open_water",
+        20 => "strength_training",
+        21 => "warm_up",
+        22 => "match",
+        23 => "exercise",
+        24 => "challenge",
+        25 => "indoor_skiing",
+        26 => "cardio_training",
+        28 => "e_bike_fitness",
+        37 => "e_bike_mountain",
+        42 => "gravel_cycling",
+        46 => "skate_skiing",
+        254 => "all",
+        _ => "unknown",
+    }
+}
+
 /// Map ANT+ device type string names back to numeric codes.
 /// The fitparser crate decodes these from the FIT profile.
 pub fn antplus_type_from_name(name: &str) -> Option<u8> {
