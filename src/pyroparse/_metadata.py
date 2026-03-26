@@ -88,7 +88,7 @@ class ActivityMetadata:
         return self._repr("ActivityMetadata")
 
 
-def merge_metadata(
+def _merge_metadata(
     base: ActivityMetadata, overrides: dict | None
 ) -> ActivityMetadata:
     """Return a copy of *base* with *overrides* applied (manual > file-native)."""
@@ -103,7 +103,7 @@ def merge_metadata(
 # Raw Rust dict → ActivityMetadata
 # ---------------------------------------------------------------------------
 
-def build_metadata(raw: dict) -> ActivityMetadata:
+def _build_metadata(raw: dict) -> ActivityMetadata:
     """Construct an ActivityMetadata from the raw dict returned by Rust."""
     start_time = None
     if raw.get("start_time") is not None:

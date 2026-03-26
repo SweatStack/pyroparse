@@ -19,6 +19,7 @@ __all__ = [
     "Device",
     "MultipleActivitiesError",
     "Session",
+    "Source",
     "Sport",
     "STANDARD_COLUMNS",
     "classify_sport",

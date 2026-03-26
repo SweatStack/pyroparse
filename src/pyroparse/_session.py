@@ -10,7 +10,7 @@ from pyroparse._activity import (
     _parse_multi,
 )
 from pyroparse._core import parse_fit_metadata as _parse_fit_metadata
-from pyroparse._metadata import ActivityMetadata, build_metadata
+from pyroparse._metadata import ActivityMetadata, _build_metadata
 from pyroparse._schema import select_columns
 
 
@@ -55,7 +55,7 @@ class Session:
         """Load metadata now, defer record data until ``.data`` is accessed."""
         resolved = str(os.fspath(path))
         raw = _parse_fit_metadata(resolved)
-        metas = [build_metadata(a["metadata"]) for a in raw["activities"]]
+        metas = [_build_metadata(a["metadata"]) for a in raw["activities"]]
 
         # All activities share a single lazy parse — first .data access triggers it.
         cache: dict[int, pa.Table] = {}

@@ -9,7 +9,7 @@ from pyroparse._core import parse_fit as _parse_fit
 from pyroparse._core import parse_fit_bytes as _parse_fit_bytes
 from pyroparse._core import parse_fit_metadata as _parse_fit_metadata
 from pyroparse._errors import MultipleActivitiesError
-from pyroparse._metadata import ActivityMetadata, build_metadata, merge_metadata
+from pyroparse._metadata import ActivityMetadata, _build_metadata, _merge_metadata
 from pyroparse._schema import select_columns
 from pyroparse._types import PathSource, Source
 
@@ -82,8 +82,8 @@ class Activity:
 
         raw_activity = activities[0]
         data = pa.Table.from_batches([raw_activity["records"]])
-        file_meta = build_metadata(raw_activity["metadata"])
-        meta = merge_metadata(file_meta, metadata)
+        file_meta = _build_metadata(raw_activity["metadata"])
+        meta = _merge_metadata(file_meta, metadata)
         data = select_columns(data, columns, extra_columns, missing)
         _filter_device_columns(meta, data)
         return cls(data, meta)
@@ -102,7 +102,7 @@ class Activity:
 
         data, file_meta = read_parquet(source)
         data = select_columns(data, columns, extra_columns, missing)
-        meta = merge_metadata(file_meta, metadata)
+        meta = _merge_metadata(file_meta, metadata)
         _filter_device_columns(meta, data)
         return cls(data, meta)
 
@@ -120,7 +120,7 @@ class Activity:
 
         data, inferred = read_csv(source)
         data = select_columns(data, columns, extra_columns, missing)
-        meta = merge_metadata(inferred, metadata)
+        meta = _merge_metadata(inferred, metadata)
         _filter_device_columns(meta, data)
         return cls(data, meta)
 
@@ -148,8 +148,8 @@ class Activity:
         if len(activities) > 1:
             raise MultipleActivitiesError(len(activities))
 
-        file_meta = build_metadata(activities[0]["metadata"])
-        file_meta = merge_metadata(file_meta, metadata)
+        file_meta = _build_metadata(activities[0]["metadata"])
+        file_meta = _merge_metadata(file_meta, metadata)
 
         def loader() -> pa.Table:
             data, _ = _parse_single(resolved)
@@ -174,7 +174,7 @@ class Activity:
 
         resolved = os.fspath(path)
         file_meta = read_parquet_metadata(resolved)
-        merged = merge_metadata(file_meta, metadata)
+        merged = _merge_metadata(file_meta, metadata)
 
         def loader() -> pa.Table:
             data, _ = read_parquet(resolved)
@@ -209,13 +209,13 @@ def _parse_single(source: Source) -> tuple[pa.Table, ActivityMetadata]:
         raise MultipleActivitiesError(len(activities))
     a = activities[0]
     data = pa.Table.from_batches([a["records"]])
-    return data, build_metadata(a["metadata"])
+    return data, _build_metadata(a["metadata"])
 
 
 def _parse_multi(source: Source) -> list[tuple[pa.Table, ActivityMetadata]]:
     """Parse a multi-activity FIT source, returning list of (data, metadata)."""
     raw = _call_parser(source)
     return [
-        (pa.Table.from_batches([a["records"]]), build_metadata(a["metadata"]))
+        (pa.Table.from_batches([a["records"]]), _build_metadata(a["metadata"]))
         for a in raw["activities"]
     ]

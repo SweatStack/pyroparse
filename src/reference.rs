@@ -154,6 +154,21 @@ mod tests {
     }
 
     #[test]
+    fn sub_sport_known_ids() {
+        assert_eq!(sub_sport_name(0), "generic");
+        assert_eq!(sub_sport_name(6), "indoor_cycling");
+        assert_eq!(sub_sport_name(7), "road");
+        assert_eq!(sub_sport_name(14), "indoor_rowing");
+        assert_eq!(sub_sport_name(17), "lap_swimming");
+        assert_eq!(sub_sport_name(3), "trail");
+    }
+
+    #[test]
+    fn sub_sport_unknown_returns_unknown() {
+        assert_eq!(sub_sport_name(255), "unknown");
+    }
+
+    #[test]
     fn antplus_type_known_names() {
         assert_eq!(antplus_type_from_name("heart_rate"), Some(120));
         assert_eq!(antplus_type_from_name("bike_power"), Some(11));

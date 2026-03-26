@@ -14,12 +14,12 @@ use reference::{
 };
 use types::{fit_value_to_arrow_type, promote_type, TypedColumn};
 use values::{
-    value_to_f32, value_to_f64, value_to_i16, value_to_i32, value_to_i64, value_to_i8,
+    value_to_f32, value_to_f64, value_to_i16, value_to_i8,
     value_to_string, value_to_timestamp_secs, value_to_timestamp_us, value_to_u8,
 };
 
 use arrow::array::{
-    Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, StringArray,
+    Float32Array, Float64Array, Int16Array, Int8Array, StringArray,
     TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
