@@ -69,6 +69,42 @@ loaded.metadata.distance   # 45230.5
 loaded.data.num_rows       # 21,666
 ```
 
+### Batch conversion
+
+Convert an entire directory tree of FIT files to Parquet, preserving the folder structure:
+
+```python
+import pyroparse as pp
+
+# In-place — parquet files appear next to fit files
+pp.convert_fit_tree("~/garmin/activities")
+
+# Mirror to a separate directory
+pp.convert_fit_tree("~/garmin/activities", "~/parquet/activities")
+
+# Use all CPU cores
+result = pp.convert_fit_tree("~/garmin", "~/parquet", workers=-1, progress=True)
+result.converted  # [Path("~/parquet/2024/ride.parquet"), ...]
+result.errors     # [(Path("~/garmin/corrupt.fit"), FitParseError(...))]
+```
+
+Re-runs are idempotent — only new files are converted. Pass `overwrite=True` to force re-conversion.
+
+### CLI
+
+```bash
+# Single file
+pyroparse convert morning_ride.fit morning_ride.parquet
+
+# Directory tree (in-place)
+pyroparse convert ~/garmin/activities/
+
+# Mirror to another location, all cores, with progress bar
+pyroparse convert ~/garmin/activities/ ~/parquet/ -w -1
+```
+
+Run `pyroparse convert --help` for all options.
+
 ---
 
 ## Standardized schema

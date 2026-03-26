@@ -5,12 +5,15 @@ description = "Fast and opinionated activity data parsing. Forged in Rust. Fired
 readme = "README.md"
 authors = [{ name = "Aart Goossens", email = "aart@sweatstack.no" }]
 requires-python = ">=3.10"
-dependencies = ["pyarrow>=14.0"]
+dependencies = ["pyarrow>=14.0", "tqdm>=4.60"]
 
 [project.optional-dependencies]
 server = ["starlette", "uvicorn[standard]", "python-multipart"]
 dev = ["pytest>=7.0", "maturin>=1.5"]
 scripts = ["polars", "duckdb", "sweatstack", "httpx", "matplotlib"]
+
+[project.scripts]
+pyroparse = "pyroparse.__main__:main"
 
 [build-system]
 requires = ["maturin>=1.5,<2.0"]
