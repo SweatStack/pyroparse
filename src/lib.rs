@@ -1,6 +1,22 @@
+mod fields;
+mod reference;
+mod types;
+mod values;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::sync::Arc;
+
+use fields::{is_canonical_column, is_handled_field, normalize_field_name};
+use reference::{
+    antplus_type_from_name, classify_developer_field, format_product_name, manufacturer_name,
+    sport_name,
+};
+use types::{fit_value_to_arrow_type, promote_type, TypedColumn};
+use values::{
+    value_to_f32, value_to_f64, value_to_i16, value_to_i32, value_to_i64, value_to_i8,
+    value_to_string, value_to_timestamp_secs, value_to_timestamp_us, value_to_u8,
+};
 
 use arrow::array::{
     Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, StringArray,
@@ -20,123 +36,6 @@ const SEMICIRCLE_TO_DEGREES: f64 = 180.0 / 2_147_483_648.0;
 // Full parser — decodes every message via the fitparser crate
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ---------------------------------------------------------------------------
-// Value extraction helpers
-// ---------------------------------------------------------------------------
-
-fn value_to_i16(val: &Value) -> Option<i16> {
-    match val {
-        Value::UInt8(v) => Some(*v as i16),
-        Value::UInt16(v) => i16::try_from(*v).ok(),
-        Value::SInt8(v) => Some(*v as i16),
-        Value::SInt16(v) => Some(*v),
-        Value::Float32(v) => Some(*v as i16),
-        Value::Float64(v) => Some(*v as i16),
-        _ => None,
-    }
-}
-
-fn value_to_i8(val: &Value) -> Option<i8> {
-    match val {
-        Value::SInt8(v) => Some(*v),
-        Value::UInt8(v) => i8::try_from(*v).ok(),
-        Value::SInt16(v) => i8::try_from(*v).ok(),
-        Value::Float32(v) => Some(*v as i8),
-        Value::Float64(v) => Some(*v as i8),
-        _ => None,
-    }
-}
-
-fn value_to_i32(val: &Value) -> Option<i32> {
-    match val {
-        Value::SInt8(v) => Some(*v as i32),
-        Value::UInt8(v) => Some(*v as i32),
-        Value::SInt16(v) => Some(*v as i32),
-        Value::UInt16(v) => Some(*v as i32),
-        Value::SInt32(v) => Some(*v),
-        Value::Float32(v) => Some(*v as i32),
-        Value::Float64(v) => Some(*v as i32),
-        _ => None,
-    }
-}
-
-fn value_to_i64(val: &Value) -> Option<i64> {
-    match val {
-        Value::SInt8(v) => Some(*v as i64),
-        Value::UInt8(v) => Some(*v as i64),
-        Value::SInt16(v) => Some(*v as i64),
-        Value::UInt16(v) => Some(*v as i64),
-        Value::SInt32(v) => Some(*v as i64),
-        Value::UInt32(v) => Some(*v as i64),
-        Value::SInt64(v) => Some(*v),
-        Value::UInt64(v) => Some(*v as i64),
-        Value::Float32(v) => Some(*v as i64),
-        Value::Float64(v) => Some(*v as i64),
-        _ => None,
-    }
-}
-
-fn value_to_f32(val: &Value) -> Option<f32> {
-    match val {
-        Value::Float32(v) => Some(*v),
-        Value::Float64(v) => Some(*v as f32),
-        Value::UInt8(v) => Some(*v as f32),
-        Value::UInt16(v) => Some(*v as f32),
-        Value::SInt8(v) => Some(*v as f32),
-        Value::SInt16(v) => Some(*v as f32),
-        _ => None,
-    }
-}
-
-fn value_to_f64(val: &Value) -> Option<f64> {
-    match val {
-        Value::Float32(v) => Some(*v as f64),
-        Value::Float64(v) => Some(*v),
-        Value::UInt8(v) => Some(*v as f64),
-        Value::UInt16(v) => Some(*v as f64),
-        Value::UInt32(v) => Some(*v as f64),
-        Value::UInt64(v) => Some(*v as f64),
-        Value::SInt8(v) => Some(*v as f64),
-        Value::SInt16(v) => Some(*v as f64),
-        Value::SInt32(v) => Some(*v as f64),
-        Value::SInt64(v) => Some(*v as f64),
-        _ => None,
-    }
-}
-
-fn value_to_timestamp_us(val: &Value) -> Option<i64> {
-    match val {
-        Value::Timestamp(dt) => {
-            Some(dt.timestamp() * 1_000_000 + dt.timestamp_subsec_micros() as i64)
-        }
-        _ => None,
-    }
-}
-
-fn value_to_timestamp_secs(val: &Value) -> Option<f64> {
-    match val {
-        Value::Timestamp(dt) => {
-            Some(dt.timestamp() as f64 + dt.timestamp_subsec_nanos() as f64 / 1e9)
-        }
-        _ => None,
-    }
-}
-
-fn value_to_string(val: &Value) -> Option<String> {
-    match val {
-        Value::String(s) => Some(s.clone()),
-        _ => None,
-    }
-}
-
-fn value_to_u8(val: &Value) -> Option<u8> {
-    match val {
-        Value::UInt8(v) => Some(*v),
-        Value::UInt16(v) => u8::try_from(*v).ok(),
-        Value::SInt16(v) => u8::try_from(*v).ok(),
-        _ => None,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Per-session merge — count non-null non-zero values to pick the winner
@@ -222,154 +121,6 @@ const COLUMN_ATTRIBUTIONS: &[ColumnAttribution] = &[
         mergeable: false,
     },
 ];
-
-// ---------------------------------------------------------------------------
-// Column-oriented storage for extra (non-fixed) FIT fields
-// ---------------------------------------------------------------------------
-
-/// A single extra column stored as a typed vector, one entry per row.
-/// Pre-allocated to n_rows with None, then filled during the second pass.
-enum TypedColumn {
-    I8(Vec<Option<i8>>),
-    I16(Vec<Option<i16>>),
-    I32(Vec<Option<i32>>),
-    I64(Vec<Option<i64>>),
-    F32(Vec<Option<f32>>),
-    F64(Vec<Option<f64>>),
-    Str(Vec<Option<String>>),
-}
-
-impl TypedColumn {
-    fn new(dtype: &DataType, n_rows: usize) -> Self {
-        match dtype {
-            DataType::Int8 => Self::I8(vec![None; n_rows]),
-            DataType::Int16 => Self::I16(vec![None; n_rows]),
-            DataType::Int32 => Self::I32(vec![None; n_rows]),
-            DataType::Int64 => Self::I64(vec![None; n_rows]),
-            DataType::Float32 => Self::F32(vec![None; n_rows]),
-            DataType::Float64 => Self::F64(vec![None; n_rows]),
-            DataType::Utf8 => Self::Str(vec![None; n_rows]),
-            _ => unreachable!("unsupported extra column type: {dtype:?}"),
-        }
-    }
-
-    fn set(&mut self, idx: usize, val: &Value) {
-        match self {
-            Self::I8(v) => v[idx] = value_to_i8(val),
-            Self::I16(v) => v[idx] = value_to_i16(val),
-            Self::I32(v) => v[idx] = value_to_i32(val),
-            Self::I64(v) => v[idx] = value_to_i64(val),
-            Self::F32(v) => v[idx] = value_to_f32(val),
-            Self::F64(v) => v[idx] = value_to_f64(val),
-            Self::Str(v) => v[idx] = value_to_string(val),
-        }
-    }
-
-    fn to_arrow_array(&self) -> Arc<dyn arrow::array::Array> {
-        match self {
-            Self::I8(v) => Arc::new(Int8Array::from_iter(v.iter().copied())),
-            Self::I16(v) => Arc::new(Int16Array::from_iter(v.iter().copied())),
-            Self::I32(v) => Arc::new(Int32Array::from_iter(v.iter().copied())),
-            Self::I64(v) => Arc::new(Int64Array::from_iter(v.iter().copied())),
-            Self::F32(v) => Arc::new(Float32Array::from_iter(v.iter().copied())),
-            Self::F64(v) => Arc::new(Float64Array::from_iter(v.iter().copied())),
-            Self::Str(v) => {
-                let arr: StringArray = v.iter().map(|s| s.as_deref()).collect();
-                Arc::new(arr)
-            }
-        }
-    }
-}
-
-/// Map a FIT Value to its Arrow DataType without allocating.
-fn fit_value_to_arrow_type(val: &Value) -> Option<DataType> {
-    match val {
-        Value::SInt8(_) => Some(DataType::Int8),
-        Value::UInt8(_) | Value::SInt16(_) => Some(DataType::Int16),
-        Value::UInt16(_) | Value::SInt32(_) => Some(DataType::Int32),
-        Value::UInt32(_) | Value::SInt64(_) | Value::UInt64(_) => Some(DataType::Int64),
-        Value::Float32(_) => Some(DataType::Float32),
-        Value::Float64(_) => Some(DataType::Float64),
-        Value::String(_) => Some(DataType::Utf8),
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Field name normalization
-// ---------------------------------------------------------------------------
-
-/// Normalize a FIT field name to a clean column name.
-///
-/// "Form Power" → "form_power", "DragFactor" → "drag_factor",
-/// "heart_rate" → "heart_rate" (unchanged).
-fn normalize_field_name(name: &str) -> String {
-    let mut result = String::with_capacity(name.len() + 4);
-    let chars: Vec<char> = name.chars().collect();
-    for (i, &ch) in chars.iter().enumerate() {
-        if ch == ' ' {
-            result.push('_');
-        } else if ch.is_ascii_uppercase() && i > 0 && chars[i - 1].is_ascii_lowercase() {
-            result.push('_');
-            result.push(ch.to_ascii_lowercase());
-        } else {
-            result.push(ch.to_ascii_lowercase());
-        }
-    }
-    result
-}
-
-/// The 11 standard columns + canonical extras — none of these are added to
-/// the dynamic extras discovered from the file.
-fn is_canonical_column(name: &str) -> bool {
-    matches!(
-        name,
-        "timestamp"
-            | "heart_rate"
-            | "power"
-            | "cadence"
-            | "speed"
-            | "latitude"
-            | "longitude"
-            | "altitude"
-            | "temperature"
-            | "distance"
-            | "lap"
-            | "lap_trigger"
-            | "core_temperature"
-            | "smo2"
-    )
-}
-
-/// Fast check for raw FIT field names handled by dedicated match arms.
-/// Must stay in sync with the Record match arms in `process_messages`.
-fn is_handled_field(name: &str) -> bool {
-    matches!(
-        name,
-        // Standard fields
-        "timestamp"
-            | "heart_rate"
-            | "power"
-            | "cadence"
-            | "speed"
-            | "enhanced_speed"
-            | "position_lat"
-            | "position_long"
-            | "altitude"
-            | "enhanced_altitude"
-            | "temperature"
-            | "distance"
-            // Developer fields merged into canonical columns
-            | "Power"
-            | "Cadence"
-            | "Core Body Temperature"
-            | "core_temperature"
-            | "Current Saturated Hemoglobin Percent"
-            | "SmO2"
-            | "smo2"
-            | "saturated_hemoglobin_percent"
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Sensor classification — identify CIQ apps from DeveloperDataId UUIDs
@@ -861,25 +612,6 @@ fn parse_all_from_bytes(data: &[u8]) -> PyResult<ParseResult> {
 // ---------------------------------------------------------------------------
 // Arrow schema & batch construction
 // ---------------------------------------------------------------------------
-
-/// Promote two Arrow types to the wider compatible type.
-fn promote_type(a: &DataType, b: &DataType) -> DataType {
-    if a == b {
-        return a.clone();
-    }
-    match (a, b) {
-        (DataType::Int8, DataType::Int16) | (DataType::Int16, DataType::Int8) => DataType::Int16,
-        (DataType::Int8 | DataType::Int16, DataType::Int32)
-        | (DataType::Int32, DataType::Int8 | DataType::Int16) => DataType::Int32,
-        (DataType::Int8 | DataType::Int16 | DataType::Int32, DataType::Int64)
-        | (DataType::Int64, DataType::Int8 | DataType::Int16 | DataType::Int32) => DataType::Int64,
-        (DataType::Float32, DataType::Float64) | (DataType::Float64, DataType::Float32) => {
-            DataType::Float64
-        }
-        (DataType::Utf8, _) | (_, DataType::Utf8) => DataType::Utf8,
-        _ => DataType::Float64,
-    }
-}
 
 /// Assign lap index and trigger to each record based on lap boundaries.
 ///
@@ -1574,85 +1306,6 @@ const RECORD_TEMPERATURE: u8 = 13;
 const RECORD_ENHANCED_SPEED: u8 = 73;
 const RECORD_ENHANCED_ALTITUDE: u8 = 78;
 
-/// Map a developer field name to a known metric name, if recognized.
-fn classify_developer_field(name: &str) -> Option<&'static str> {
-    let lower = name.to_lowercase();
-    if lower.contains("core") && lower.contains("temp") { return Some("core_temperature"); }
-    if lower.contains("hemoglobin") || lower.contains("smo2") || lower.contains("muscle oxygen") {
-        return Some("smo2");
-    }
-    if lower == "power" { return Some("power"); }
-    None
-}
-
-fn sport_name(v: u8) -> &'static str {
-    match v {
-        0 => "generic", 1 => "running", 2 => "cycling", 3 => "transition",
-        4 => "fitness_equipment", 5 => "swimming", 6 => "basketball",
-        7 => "soccer", 8 => "tennis", 10 => "training", 11 => "walking",
-        12 => "cross_country_skiing", 13 => "alpine_skiing",
-        14 => "snowboarding", 15 => "rowing", 16 => "mountaineering",
-        17 => "hiking", 18 => "multisport", 19 => "paddling",
-        21 => "e_biking", 23 => "boating", 25 => "golf",
-        37 => "stand_up_paddleboarding", 38 => "surfing", 53 => "diving",
-        _ => "unknown",
-    }
-}
-
-/// Map ANT+ device type string names back to numeric codes.
-/// The fitparser crate decodes these from the FIT profile.
-fn antplus_type_from_name(name: &str) -> Option<u8> {
-    match name {
-        "heart_rate" => Some(120),
-        "bike_speed_cadence" => Some(121),
-        "bike_cadence" => Some(122),
-        "bike_speed" => Some(123),
-        "bike_power" => Some(11),
-        "stride_speed_distance" => Some(124),
-        _ => None,
-    }
-}
-
-/// Clean a raw product name like "fenix6" or "hrm_pro" by replacing
-/// underscores and hyphens with spaces.  Preserves original casing.
-fn format_product_name(raw: &str) -> String {
-    raw.chars()
-        .map(|c| if c == '_' || c == '-' { ' ' } else { c })
-        .collect()
-}
-
-/// Map FIT manufacturer IDs to names.  Derived from the FIT SDK profile.
-/// Only includes manufacturers commonly seen in fitness device files.
-fn manufacturer_name(v: u16) -> &'static str {
-    match v {
-        1 | 15 => "garmin",
-        6 => "srm",
-        7 => "quarq",
-        9 => "saris",
-        23 => "suunto",
-        32 => "wahoo_fitness",
-        38 => "osynce",
-        40 => "concept2",
-        41 => "shimano",
-        44 => "brim_brothers",
-        48 => "pioneer",
-        60 => "rotor",
-        63 => "specialized",
-        69 => "stages_cycling",
-        70 => "sigmasport",
-        73 => "wattbike",
-        76 => "moxy",
-        81 => "bontrager",
-        86 => "elite",
-        89 => "tacx",
-        95 => "stryd",
-        260 => "zwift",
-        263 => "favero",
-        265 => "coros",
-        289 => "hammerhead",
-        _ => "unknown",
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Binary scanner data structures
@@ -2128,4 +1781,213 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_fit_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(parse_fit_metadata, m)?)?;
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Lap assignment ───────────────────────────────────────────────────
+
+    mod lap_assignment {
+        use super::*;
+
+        fn make_record(ts: i64) -> RecordRow {
+            RecordRow {
+                timestamp: Some(ts),
+                ..Default::default()
+            }
+        }
+
+        fn make_lap(start: i64, end: i64, trigger: Option<&str>) -> LapBoundary {
+            LapBoundary {
+                start_time_us: start,
+                end_time_us: end,
+                trigger: trigger.map(String::from),
+            }
+        }
+
+        #[test]
+        fn no_laps_all_records_get_lap_zero() {
+            let records = vec![make_record(100), make_record(200), make_record(300)];
+            let (indices, triggers) = assign_laps(&records, &[]);
+            assert_eq!(indices, vec![0, 0, 0]);
+            assert!(triggers.iter().all(|t| t.is_none()));
+        }
+
+        #[test]
+        fn single_lap_all_records_inside() {
+            let records = vec![make_record(100), make_record(200)];
+            let laps = vec![make_lap(100, 300, Some("manual"))];
+            let (indices, triggers) = assign_laps(&records, &laps);
+            assert_eq!(indices, vec![0, 0]);
+            assert_eq!(triggers, vec![Some("manual".into()), Some("manual".into())]);
+        }
+
+        #[test]
+        fn two_laps_records_split() {
+            let records = vec![
+                make_record(100),
+                make_record(200),
+                make_record(300),
+                make_record(400),
+            ];
+            let laps = vec![
+                make_lap(100, 250, Some("manual")),
+                make_lap(250, 500, Some("session_end")),
+            ];
+            let (indices, triggers) = assign_laps(&records, &laps);
+            assert_eq!(indices, vec![0, 0, 1, 1]);
+            assert_eq!(
+                triggers,
+                vec![
+                    Some("manual".into()),
+                    Some("manual".into()),
+                    Some("session_end".into()),
+                    Some("session_end".into()),
+                ]
+            );
+        }
+
+        #[test]
+        fn pre_lap_records_get_synthetic_lap_zero() {
+            let records = vec![
+                make_record(50),  // before first lap
+                make_record(100),
+                make_record(200),
+            ];
+            let laps = vec![make_lap(100, 300, Some("manual"))];
+            let (indices, triggers) = assign_laps(&records, &laps);
+            // Pre-lap record → synthetic lap 0, real lap shifts to 1
+            assert_eq!(indices, vec![0, 1, 1]);
+            assert_eq!(triggers[0], None); // synthetic lap has no trigger
+            assert_eq!(triggers[1], Some("manual".into()));
+        }
+
+        #[test]
+        fn empty_records() {
+            let (indices, triggers) = assign_laps(&[], &[]);
+            assert!(indices.is_empty());
+            assert!(triggers.is_empty());
+        }
+    }
+
+    // ── Device deduplication ─────────────────────────────────────────────
+
+    mod device_dedup {
+        use super::*;
+
+        fn make_device(idx: Option<u8>, mfr: Option<&str>, product: Option<&str>) -> DeviceMeta {
+            DeviceMeta {
+                device_index: idx,
+                manufacturer: mfr.map(String::from),
+                product: product.map(String::from),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn no_duplicates_unchanged() {
+            let devices = vec![
+                make_device(Some(0), Some("garmin"), Some("fenix6")),
+                make_device(Some(1), Some("wahoo"), Some("kickr")),
+            ];
+            let result = dedup_devices(&devices);
+            assert_eq!(result.len(), 2);
+            assert_eq!(result[0].manufacturer.as_deref(), Some("garmin"));
+            assert_eq!(result[1].manufacturer.as_deref(), Some("wahoo"));
+        }
+
+        #[test]
+        fn duplicate_index_merges_fills_none() {
+            let devices = vec![
+                make_device(Some(1), Some("wahoo"), None), // first emission: no product
+                make_device(Some(1), None, Some("kickr")), // second emission: has product
+            ];
+            let result = dedup_devices(&devices);
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].manufacturer.as_deref(), Some("wahoo"));
+            assert_eq!(result[0].product.as_deref(), Some("kickr"));
+        }
+
+        #[test]
+        fn first_value_preserved_on_conflict() {
+            let devices = vec![
+                make_device(Some(0), Some("garmin"), Some("fenix6")),
+                make_device(Some(0), Some("different"), Some("other")),
+            ];
+            let result = dedup_devices(&devices);
+            assert_eq!(result.len(), 1);
+            // First non-None value wins
+            assert_eq!(result[0].manufacturer.as_deref(), Some("garmin"));
+            assert_eq!(result[0].product.as_deref(), Some("fenix6"));
+        }
+
+        #[test]
+        fn none_index_devices_not_merged() {
+            let devices = vec![
+                make_device(None, Some("unknown1"), None),
+                make_device(None, Some("unknown2"), None),
+            ];
+            let result = dedup_devices(&devices);
+            assert_eq!(result.len(), 2);
+        }
+
+        #[test]
+        fn ant_device_type_merged() {
+            let mut d1 = make_device(Some(1), Some("wahoo"), None);
+            d1.ant_device_type = None;
+            let mut d2 = make_device(Some(1), None, None);
+            d2.ant_device_type = Some(11); // bike_power
+            let result = dedup_devices(&[d1, d2]);
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].ant_device_type, Some(11));
+        }
+    }
+
+    // ── Binary scanner helpers ───────────────────────────────────────────
+
+    mod scanner_helpers {
+        use super::*;
+
+        #[test]
+        fn valid_u32_normal() {
+            let data = 1000u32.to_le_bytes().to_vec();
+            assert_eq!(valid_u32(&data, false), Some(1000));
+        }
+
+        #[test]
+        fn valid_u32_invalid_marker() {
+            let data = 0xFFFFFFFFu32.to_le_bytes().to_vec();
+            assert_eq!(valid_u32(&data, false), None);
+        }
+
+        #[test]
+        fn valid_u32_big_endian() {
+            let data = 1000u32.to_be_bytes().to_vec();
+            assert_eq!(valid_u32(&data, true), Some(1000));
+        }
+
+        #[test]
+        fn read_u16_little_endian() {
+            let data = 0x1234u16.to_le_bytes().to_vec();
+            assert_eq!(read_u16(&data, false), 0x1234);
+        }
+
+        #[test]
+        fn read_u16_big_endian() {
+            let data = 0x1234u16.to_be_bytes().to_vec();
+            assert_eq!(read_u16(&data, true), 0x1234);
+        }
+
+        #[test]
+        fn read_u32_little_endian() {
+            let data = 0x12345678u32.to_le_bytes().to_vec();
+            assert_eq!(read_u32(&data, false), 0x12345678);
+        }
+    }
 }

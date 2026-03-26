@@ -11,36 +11,36 @@ class TestLapColumn:
     def test_lap_in_standard_columns(self):
         assert "lap" in STANDARD_COLUMNS
 
-    def test_lap_present_by_default(self, fit_path):
-        data = Activity.load_fit(fit_path).data
+    def test_lap_present_by_default(self, cycling_activity):
+        data = cycling_activity.data
         assert "lap" in data.column_names
 
-    def test_lap_type_is_int16(self, fit_path):
-        schema = Activity.load_fit(fit_path).data.schema
+    def test_lap_type_is_int16(self, cycling_activity):
+        schema = cycling_activity.data.schema
         assert schema.field("lap").type == pa.int16()
 
-    def test_lap_no_nulls(self, fit_path):
-        col = Activity.load_fit(fit_path).data.column("lap")
+    def test_lap_no_nulls(self, cycling_activity):
+        col = cycling_activity.data.column("lap")
         assert col.null_count == 0
 
-    def test_lap_zero_indexed(self, fit_path):
-        col = Activity.load_fit(fit_path).data.column("lap")
+    def test_lap_zero_indexed(self, cycling_activity):
+        col = cycling_activity.data.column("lap")
         assert pc.min(col).as_py() == 0
 
-    def test_lap_contiguous(self, fit_path):
+    def test_lap_contiguous(self, cycling_activity):
         """Lap indices form a contiguous range 0..N."""
-        col = Activity.load_fit(fit_path).data.column("lap")
+        col = cycling_activity.data.column("lap")
         unique = sorted(set(col.to_pylist()))
         assert unique == list(range(len(unique)))
 
-    def test_lap_count_matches_fixture(self, fit_path):
+    def test_lap_count_matches_fixture(self, cycling_activity):
         """test.fit has 6 laps."""
-        col = Activity.load_fit(fit_path).data.column("lap")
+        col = cycling_activity.data.column("lap")
         assert pc.max(col).as_py() == 5
 
-    def test_lap_monotonic(self, fit_path):
+    def test_lap_monotonic(self, cycling_activity):
         """Lap indices never decrease across rows (sorted by timestamp)."""
-        col = Activity.load_fit(fit_path).data.column("lap").to_pylist()
+        col = cycling_activity.data.column("lap").to_pylist()
         for i in range(1, len(col)):
             assert col[i] >= col[i - 1]
 
@@ -51,16 +51,16 @@ class TestLapTrigger:
     def test_not_in_standard_columns(self):
         assert "lap_trigger" not in STANDARD_COLUMNS
 
-    def test_not_present_by_default(self, fit_path):
-        data = Activity.load_fit(fit_path).data
+    def test_not_present_by_default(self, cycling_activity):
+        data = cycling_activity.data
         assert "lap_trigger" not in data.column_names
 
     def test_available_via_extra_columns(self, fit_path):
         data = Activity.load_fit(fit_path, extra_columns=["lap_trigger"]).data
         assert "lap_trigger" in data.column_names
 
-    def test_available_via_columns_all(self, fit_path):
-        data = Activity.load_fit(fit_path, columns="all").data
+    def test_available_via_columns_all(self, cycling_activity_all):
+        data = cycling_activity_all.data
         assert "lap_trigger" in data.column_names
 
     def test_trigger_values(self, fit_path):
@@ -90,27 +90,27 @@ class TestLapTrigger:
         for lap, trigger_set in by_lap.items():
             assert len(trigger_set) == 1, f"Lap {lap} has mixed triggers: {trigger_set}"
 
-    def test_not_in_metrics(self, fit_path):
+    def test_not_in_metrics(self, cycling_activity_all):
         """lap_trigger is structural, not a metric."""
-        metrics = Activity.load_fit(fit_path, columns="all").metadata.metrics
+        metrics = cycling_activity_all.metadata.metrics
         assert "lap_trigger" not in metrics
 
 
 class TestLapNotInMetrics:
-    def test_lap_not_in_metrics(self, fit_path):
+    def test_lap_not_in_metrics(self, cycling_activity):
         """lap is structural, not a metric."""
-        metrics = Activity.load_fit(fit_path).metadata.metrics
+        metrics = cycling_activity.metadata.metrics
         assert "lap" not in metrics
 
 
 class TestLapWithDeveloperFields:
-    def test_lap_present(self, dev_fields_path):
-        data = Activity.load_fit(dev_fields_path).data
+    def test_lap_present(self, running_activity):
+        data = running_activity.data
         assert "lap" in data.column_names
 
-    def test_lap_count(self, dev_fields_path):
+    def test_lap_count(self, running_activity):
         """with-developer-fields.fit has 7 laps."""
-        col = Activity.load_fit(dev_fields_path).data.column("lap")
+        col = running_activity.data.column("lap")
         assert pc.max(col).as_py() == 6
 
     def test_trigger_values(self, dev_fields_path):
@@ -124,17 +124,15 @@ class TestLapWithDeveloperFields:
 class TestLapMultiSession:
     """Lap indices reset to 0 per session in multi-activity files."""
 
-    def test_laps_reset_per_session(self, multi_session_path):
-        session = Session.load_fit(multi_session_path)
-        for activity in session.activities:
+    def test_laps_reset_per_session(self, multi_session):
+        for activity in multi_session.activities:
             col = activity.data.column("lap")
             assert pc.min(col).as_py() == 0, (
                 f"{activity.metadata.sport}: lap should start at 0"
             )
 
-    def test_each_session_has_laps(self, multi_session_path):
-        session = Session.load_fit(multi_session_path)
-        for activity in session.activities:
+    def test_each_session_has_laps(self, multi_session):
+        for activity in multi_session.activities:
             col = activity.data.column("lap")
             assert col.null_count == 0
 
