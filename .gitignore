@@ -28,5 +28,8 @@ data/
 
 # AI agents/skills
 .agents/
+!.agents/skills/
+!.agents/skills/pyroparse/
+!.agents/skills/pyroparse/**
 .claude/
 skills-lock.json

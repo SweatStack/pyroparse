@@ -31,14 +31,14 @@ import pyroparse as pp
 
 activity = pp.Activity.load_fit("ride.fit")
 
-activity.metadata.sport         # "cycling"
+activity.metadata.sport         # "cycling.road"
 activity.metadata.start_time    # datetime(2024, 3, 19, 5, 30, tzinfo=UTC)
 activity.metadata.duration      # 3842.7 (seconds)
 activity.metadata.distance      # 45230.5 (meters)
 activity.metadata.metrics       # {"heart_rate", "power", "speed", "cadence", "gps"}
-activity.metadata.devices       # [Device(manufacturer="garmin", product="edge_540", ...)]
+activity.metadata.devices       # [Device(garmin edge_540 (creator), columns=[heart_rate,power])]
 
-activity.data                   # pyarrow.Table — 21,666 rows × 7 typed columns
+activity.data                   # pyarrow.Table — 21,666 rows × 11 typed columns
 ```
 
 ### Lazy loading
@@ -47,8 +47,8 @@ activity.data                   # pyarrow.Table — 21,666 rows × 7 typed colum
 
 ```python
 activity = pp.Activity.open_fit("ride.fit")
-activity.metadata.sport     # "cycling" — available immediately
-activity.metadata.duration  # 3842.7   — no data parsed yet
+activity.metadata.sport     # "cycling.road" — available immediately
+activity.metadata.duration  # 3842.7         — no data parsed yet
 
 activity.data               # pyarrow.Table — parsed on first access
 ```
@@ -64,7 +64,7 @@ Load it back with data and metadata intact:
 
 ```python
 loaded = pp.Activity.load_parquet("ride.parquet")
-loaded.metadata.sport      # "cycling"
+loaded.metadata.sport      # "cycling.road"
 loaded.metadata.distance   # 45230.5
 loaded.data.num_rows       # 21,666
 ```
@@ -92,18 +92,27 @@ Re-runs are idempotent — only new files are converted. Pass `overwrite=True` t
 
 ### CLI
 
+Install the CLI tool:
+
 ```bash
-# Single file
-pyroparse convert morning_ride.fit morning_ride.parquet
-
-# Directory tree (in-place)
-pyroparse convert ~/garmin/activities/
-
-# Mirror to another location, all cores, with progress bar
-pyroparse convert ~/garmin/activities/ ~/parquet/ -w -1
+curl -LsSf uvx.sh/pyroparse/install.sh | sh
 ```
 
-Run `pyroparse convert --help` for all options.
+```bash
+# Single file
+pyroparse convert morning_ride.fit
+pyroparse convert morning_ride.fit -o /tmp/ride.parquet
+
+# Directory tree, all cores, with progress bar
+pyroparse convert ~/garmin/activities/ -o ~/parquet/ -w -1
+
+# Dump raw FIT messages as JSON
+pyroparse dump ride.fit
+pyroparse dump ride.fit --kind event,hr_zone
+pyroparse dump ride.fit --exclude record -o debug.json
+```
+
+Run `pyroparse convert --help` or `pyroparse dump --help` for all options.
 
 ---
 
@@ -113,14 +122,19 @@ FIT files are a mess. `enhanced_speed` vs `speed`, semicircle-encoded GPS, manuf
 
 | Column | Arrow Type | Notes |
 |--------|-----------|-------|
-| `timestamp` | `Timestamp(us, UTC)` | Microsecond, timezone-aware, Polars default |
-| `heart_rate` | `Int16` | All integer metrics share one type |
-| `power` | `Int16` | |
-| `cadence` | `Int16` | |
+| `timestamp` | `Timestamp(us, UTC)` | Microsecond, timezone-aware, always present |
+| `heart_rate` | `Int16` | BPM |
+| `power` | `Int16` | Watts |
+| `cadence` | `Int16` | RPM (cycling) or SPM (running) |
 | `speed` | `Float32` | m/s, normalized from `enhanced_speed` variants |
-| `position_lat` | `Float64` | Degrees, converted from semicircles. Sub-meter precision. |
-| `position_long` | `Float64` | |
+| `latitude` | `Float64` | Degrees, converted from semicircles |
+| `longitude` | `Float64` | Degrees, converted from semicircles |
+| `altitude` | `Float32` | Meters, normalized from `enhanced_altitude` |
+| `temperature` | `Int8` | Celsius |
+| `distance` | `Float64` | Cumulative meters |
 | `lap` | `Int16` | 0-based lap index, from FIT Lap messages |
+
+These 11 columns are the default output. Use `columns="all"` to get additional columns like `core_temperature`, `smo2`, `form_power`, and `stance_time` from CIQ apps and running dynamics.
 
 These types are native across the ecosystem, no casting, no surprises:
 
@@ -168,7 +182,7 @@ Metadata is extracted from FIT Session and DeviceInfo messages, the same source 
 ```python
 @dataclass
 class ActivityMetadata:
-    sport: str | None               # "cycling", "running", "swimming"
+    sport: str | None               # "cycling.road", "running.trail"
     name: str | None                # user-given activity name
     start_time: datetime | None     # UTC
     start_time_local: datetime | None  # naive, local wall-clock time
@@ -283,6 +297,42 @@ session.activities[2].metadata.sport  # "running"
 
 ---
 
+## Raw FIT messages
+
+`all_messages()` is the escape hatch — every message in the FIT file, no pyroparse opinions applied. Field names, values, and units come straight from the FIT profile as decoded by `fitparser`. Use it for HR zones, workout steps, events, or anything the opinionated interface doesn't cover.
+
+```python
+import pyroparse as pp
+
+msgs = pp.all_messages("ride.fit")
+
+# Each message has a kind and a list of fields
+msgs[0]
+# {"kind": "file_id", "fields": [{"name": "type", "number": 0, ...}, ...]}
+
+# Get HR zones
+zones = [m["fields"] for m in msgs if m["kind"] == "hr_zone"]
+
+# Get all events in order
+events = [m["fields"] for m in msgs if m["kind"] == "event"]
+
+# Get workout interval definitions
+steps = [m["fields"] for m in msgs if m["kind"] == "workout_step"]
+
+# Access session fields that pyroparse doesn't model
+sessions = [m for m in msgs if m["kind"] == "session"]
+fields = {f["name"]: f["value"] for f in sessions[0]["fields"]}
+fields["avg_stance_time"]  # not in ActivityMetadata, but here
+```
+
+Or from the command line:
+
+```bash
+pyroparse dump ride.fit --kind event,session --compact | jq '.'
+```
+
+---
+
 ## CSV
 
 ```python
@@ -295,6 +345,12 @@ Timestamps, duration, and available metrics are inferred automatically. Constant
 ---
 
 ## Installation
+
+```bash
+uv add pyroparse
+```
+
+Or with pip:
 
 ```bash
 pip install pyroparse
