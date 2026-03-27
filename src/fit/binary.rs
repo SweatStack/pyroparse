@@ -65,6 +65,7 @@ pub struct DevFieldLayout {
 
 /// Information about a parsed file header.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FileHeader {
     pub header_size: u8,
     pub protocol_version: u8,
@@ -105,6 +106,7 @@ impl MessageDef {
 pub enum FitEvent<'a> {
     /// A file header was parsed. For chained files, this appears multiple
     /// times. The decoder should reset state when it sees this after a Crc.
+    #[allow(dead_code)]
     FileHeader(FileHeader),
 
     /// A definition message was parsed. The reader stores it internally.
@@ -133,7 +135,10 @@ pub enum FitEvent<'a> {
 
     /// End of a FIT file section. `valid` indicates whether the CRC matched.
     /// For chained files, another FileHeader may follow.
-    Crc { valid: bool },
+    Crc {
+        #[allow(dead_code)]
+        valid: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

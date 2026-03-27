@@ -18,9 +18,9 @@ use crate::reference::{classify_developer_field, format_product_name};
 use crate::fields::{normalize_field_name, is_canonical_column, is_handled_field};
 use crate::types::{TypedColumn, promote_type, base_type_to_arrow};
 use crate::{
-    SessionMeta, DeviceMeta, DeveloperSensor, ScanResult, ParseResult,
+    SessionMeta, DeviceMeta, ScanResult, ParseResult,
     RecordRow, LapBoundary, SEMICIRCLE_TO_DEGREES,
-    classify_developer_sensors, bytes_to_uuid, name_for_uuid,
+    classify_developer_sensors, bytes_to_uuid,
     column_for_developer_field,
 };
 
@@ -490,12 +490,7 @@ impl Default for ParseConfig {
 /// - Pass 2: decode Record fields into RecordRow + fill extra columns
 ///
 /// When `config.columns` is set, only the requested fields are decoded.
-pub fn full_parse(data: &[u8]) -> Result<ParseResult, String> {
-    full_parse_with_config(data, &ParseConfig::default())
-}
-
-/// Full parse with explicit configuration.
-pub fn full_parse_with_config(data: &[u8], config: &ParseConfig) -> Result<ParseResult, String> {
+pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, String> {
     let (field_mask, decode_extras) = config.build_field_mask();
     // ── Pass 1: metadata + extra column discovery ────────────────────────
     let mut reader = FitReader::new(data).map_err(|e| e.to_string())?;
@@ -1197,57 +1192,6 @@ mod tests {
         assert!(result.sessions.len() > 1, "expected multiple sessions, got {}", result.sessions.len());
     }
 
-    #[test]
-    fn test_scan_parity_with_fitscanner() {
-        // Compare new scanner against the old FitScanner for all fixtures.
-        use crate::FitScanner;
-
-        for fixture in &["test.fit", "with-developer-fields.fit", "cycling-rowing-cycling-rowing.fit"] {
-            let path = std::path::Path::new("tests/fixtures").join(fixture);
-            if !path.exists() { continue; }
-            let data = std::fs::read(&path).unwrap();
-
-            let mut old_scanner = FitScanner::new(&data).unwrap();
-            let old_result = old_scanner.scan().unwrap();
-            let new_result = scan_metadata(&data).unwrap();
-
-            // Session count.
-            assert_eq!(
-                old_result.sessions.len(), new_result.sessions.len(),
-                "{fixture}: session count mismatch"
-            );
-
-            // Per-session fields.
-            for (i, (old, new)) in old_result.sessions.iter().zip(&new_result.sessions).enumerate() {
-                assert_eq!(old.sport, new.sport, "{fixture} session {i}: sport mismatch");
-                assert_eq!(old.sub_sport, new.sub_sport, "{fixture} session {i}: sub_sport mismatch");
-                assert_eq!(old.start_time, new.start_time, "{fixture} session {i}: start_time mismatch");
-                assert_eq!(old.start_timestamp_us, new.start_timestamp_us, "{fixture} session {i}: start_timestamp_us mismatch");
-                assert_eq!(old.end_timestamp_us, new.end_timestamp_us, "{fixture} session {i}: end_timestamp_us mismatch");
-                assert_eq!(old.duration, new.duration, "{fixture} session {i}: duration mismatch");
-                assert_eq!(old.distance, new.distance, "{fixture} session {i}: distance mismatch");
-            }
-
-            // Device count.
-            assert_eq!(
-                old_result.devices.len(), new_result.devices.len(),
-                "{fixture}: device count mismatch"
-            );
-
-            // Metrics (as sorted sets for order-independent comparison).
-            let mut old_metrics: Vec<_> = old_result.record_metrics.clone();
-            let mut new_metrics: Vec<_> = new_result.record_metrics.clone();
-            old_metrics.sort();
-            new_metrics.sort();
-            assert_eq!(old_metrics, new_metrics, "{fixture}: metrics mismatch");
-
-            // Developer sensor count.
-            assert_eq!(
-                old_result.developer_sensors.len(), new_result.developer_sensors.len(),
-                "{fixture}: developer sensor count mismatch"
-            );
-        }
-    }
 
     // -- Full parse tests --
 
@@ -1257,7 +1201,7 @@ mod tests {
         if !path.exists() { return; }
         let data = std::fs::read(path).unwrap();
 
-        let result = full_parse(&data).unwrap();
+        let result = full_parse(&data, &ParseConfig::default()).unwrap();
 
         assert!(!result.records.is_empty(), "expected records");
         assert!(!result.sessions.is_empty(), "expected sessions");
@@ -1270,7 +1214,7 @@ mod tests {
         if !path.exists() { return; }
         let data = std::fs::read(path).unwrap();
 
-        let result = full_parse(&data).unwrap();
+        let result = full_parse(&data, &ParseConfig::default()).unwrap();
 
         assert!(!result.records.is_empty());
         assert!(!result.developer_sensors.is_empty());
@@ -1286,95 +1230,11 @@ mod tests {
         if !path.exists() { return; }
         let data = std::fs::read(path).unwrap();
 
-        let result = full_parse(&data).unwrap();
+        let result = full_parse(&data, &ParseConfig::default()).unwrap();
 
         assert!(result.sessions.len() > 1, "expected multiple sessions");
         assert!(!result.records.is_empty());
         assert!(!result.laps.is_empty(), "expected laps");
     }
 
-    #[test]
-    fn test_full_parse_parity_with_fitparser() {
-        // Compare our full_parse against the fitparser-based process_messages.
-        use crate::process_messages;
-
-        for fixture in &["test.fit", "with-developer-fields.fit", "cycling-rowing-cycling-rowing.fit"] {
-            let path = std::path::Path::new("tests/fixtures").join(fixture);
-            if !path.exists() { continue; }
-            let data = std::fs::read(&path).unwrap();
-
-            // Old path: fitparser → process_messages.
-            let messages = fitparser::from_bytes(&data).unwrap();
-            let old = process_messages(&messages);
-
-            // New path: our full_parse.
-            let new = full_parse(&data).unwrap();
-
-            // Record count.
-            assert_eq!(
-                old.records.len(), new.records.len(),
-                "{fixture}: record count mismatch (old={}, new={})",
-                old.records.len(), new.records.len()
-            );
-
-            // Session count.
-            assert_eq!(
-                old.sessions.len(), new.sessions.len(),
-                "{fixture}: session count mismatch"
-            );
-
-            // Per-session metadata.
-            for (i, (o, n)) in old.sessions.iter().zip(&new.sessions).enumerate() {
-                assert_eq!(o.sport, n.sport, "{fixture} session {i}: sport");
-                assert_eq!(o.sub_sport, n.sub_sport, "{fixture} session {i}: sub_sport");
-                assert_eq!(o.duration, n.duration, "{fixture} session {i}: duration");
-                assert_eq!(o.distance, n.distance, "{fixture} session {i}: distance");
-            }
-
-            // Lap count.
-            assert_eq!(
-                old.laps.len(), new.laps.len(),
-                "{fixture}: lap count mismatch"
-            );
-
-            // Spot-check record values (first and last).
-            for idx in [0, old.records.len() / 2, old.records.len() - 1] {
-                let o = &old.records[idx];
-                let n = &new.records[idx];
-                assert_eq!(o.timestamp, n.timestamp,
-                    "{fixture} record {idx}: timestamp (old={:?}, new={:?})", o.timestamp, n.timestamp);
-                assert_eq!(o.heart_rate, n.heart_rate,
-                    "{fixture} record {idx}: heart_rate");
-                assert_eq!(o.power, n.power,
-                    "{fixture} record {idx}: power");
-                assert_eq!(o.cadence, n.cadence,
-                    "{fixture} record {idx}: cadence");
-                // Float comparisons with tolerance.
-                assert_float_eq(o.speed, n.speed, 0.01,
-                    &format!("{fixture} record {idx}: speed"));
-                assert_float_eq(o.altitude, n.altitude, 0.1,
-                    &format!("{fixture} record {idx}: altitude"));
-            }
-
-            // Device count — allow ±1 difference due to garmin_product subfield
-            // resolution differences between fitparser and our raw decoder.
-            // The downstream dedup_devices() function handles duplicates.
-            let diff = (old.devices.len() as isize - new.devices.len() as isize).unsigned_abs();
-            assert!(
-                diff <= 1,
-                "{fixture}: device count too different (old={}, new={})",
-                old.devices.len(), new.devices.len()
-            );
-        }
-    }
-
-    fn assert_float_eq(a: Option<f32>, b: Option<f32>, tol: f32, msg: &str) {
-        match (a, b) {
-            (Some(a), Some(b)) => {
-                assert!((a - b).abs() < tol, "{msg}: {a} != {b} (tol={tol})");
-            }
-            (None, None) => {}
-            _ => panic!("{msg}: {:?} != {:?}", a, b),
-        }
-    }
 }

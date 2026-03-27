@@ -44,8 +44,9 @@ pub fn is_canonical_column(name: &str) -> bool {
     )
 }
 
-/// Fast check for raw FIT field names handled by dedicated match arms.
-/// Must stay in sync with the Record match arms in `process_messages`.
+/// Fast check for raw FIT field names handled by dedicated match arms
+/// in the Record decoder (`fit::decode`). Fields listed here are decoded
+/// directly into `RecordRow` fields, not routed through the extras system.
 pub fn is_handled_field(name: &str) -> bool {
     matches!(
         name,

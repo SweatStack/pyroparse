@@ -8,12 +8,6 @@ use arrow::array::{
     Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, StringArray,
 };
 use arrow::datatypes::DataType;
-use fitparser::Value;
-
-use crate::values::{
-    value_to_f32, value_to_f64, value_to_i16, value_to_i32, value_to_i64, value_to_i8,
-    value_to_string,
-};
 
 /// A single extra column stored as a typed vector, one entry per row.
 /// Pre-allocated to n_rows with None, then filled during the second pass.
@@ -38,18 +32,6 @@ impl TypedColumn {
             DataType::Float64 => Self::F64(vec![None; n_rows]),
             DataType::Utf8 => Self::Str(vec![None; n_rows]),
             _ => unreachable!("unsupported extra column type: {dtype:?}"),
-        }
-    }
-
-    pub fn set(&mut self, idx: usize, val: &Value) {
-        match self {
-            Self::I8(v) => v[idx] = value_to_i8(val),
-            Self::I16(v) => v[idx] = value_to_i16(val),
-            Self::I32(v) => v[idx] = value_to_i32(val),
-            Self::I64(v) => v[idx] = value_to_i64(val),
-            Self::F32(v) => v[idx] = value_to_f32(val),
-            Self::F64(v) => v[idx] = value_to_f64(val),
-            Self::Str(v) => v[idx] = value_to_string(val),
         }
     }
 
@@ -114,20 +96,6 @@ impl TypedColumn {
                 Arc::new(arr)
             }
         }
-    }
-}
-
-/// Map a FIT Value to its Arrow DataType without allocating.
-pub fn fit_value_to_arrow_type(val: &Value) -> Option<DataType> {
-    match val {
-        Value::SInt8(_) => Some(DataType::Int8),
-        Value::UInt8(_) | Value::SInt16(_) => Some(DataType::Int16),
-        Value::UInt16(_) | Value::SInt32(_) => Some(DataType::Int32),
-        Value::UInt32(_) | Value::SInt64(_) | Value::UInt64(_) => Some(DataType::Int64),
-        Value::Float32(_) => Some(DataType::Float32),
-        Value::Float64(_) => Some(DataType::Float64),
-        Value::String(_) => Some(DataType::Utf8),
-        _ => None,
     }
 }
 
@@ -285,61 +253,6 @@ pub fn base_type_to_arrow(base_type: u8) -> Option<DataType> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── FIT value → Arrow type mapping ───────────────────────────────────
-
-    #[test]
-    fn sint8_maps_to_int8() {
-        assert_eq!(fit_value_to_arrow_type(&Value::SInt8(0)), Some(DataType::Int8));
-    }
-
-    #[test]
-    fn uint8_maps_to_int16() {
-        assert_eq!(fit_value_to_arrow_type(&Value::UInt8(0)), Some(DataType::Int16));
-    }
-
-    #[test]
-    fn sint16_maps_to_int16() {
-        assert_eq!(fit_value_to_arrow_type(&Value::SInt16(0)), Some(DataType::Int16));
-    }
-
-    #[test]
-    fn uint16_maps_to_int32() {
-        assert_eq!(fit_value_to_arrow_type(&Value::UInt16(0)), Some(DataType::Int32));
-    }
-
-    #[test]
-    fn sint32_maps_to_int32() {
-        assert_eq!(fit_value_to_arrow_type(&Value::SInt32(0)), Some(DataType::Int32));
-    }
-
-    #[test]
-    fn uint32_maps_to_int64() {
-        assert_eq!(fit_value_to_arrow_type(&Value::UInt32(0)), Some(DataType::Int64));
-    }
-
-    #[test]
-    fn float32_maps_to_float32() {
-        assert_eq!(fit_value_to_arrow_type(&Value::Float32(0.0)), Some(DataType::Float32));
-    }
-
-    #[test]
-    fn float64_maps_to_float64() {
-        assert_eq!(fit_value_to_arrow_type(&Value::Float64(0.0)), Some(DataType::Float64));
-    }
-
-    #[test]
-    fn string_maps_to_utf8() {
-        assert_eq!(
-            fit_value_to_arrow_type(&Value::String("x".into())),
-            Some(DataType::Utf8)
-        );
-    }
-
-    #[test]
-    fn array_maps_to_none() {
-        assert_eq!(fit_value_to_arrow_type(&Value::Array(vec![])), None);
-    }
 
     // ── Type promotion ───────────────────────────────────────────────────
 
