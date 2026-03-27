@@ -1756,22 +1756,25 @@ fn build_scan_result_dict(py: Python<'_>, scan: &ScanResult) -> PyResult<PyObjec
 // Python-exposed functions
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn do_parse(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
-    let parsed = fit::decode::full_parse(data)
+fn do_parse(py: Python<'_>, data: &[u8], columns: Option<Vec<String>>) -> PyResult<PyObject> {
+    let config = fit::decode::ParseConfig { columns };
+    let parsed = fit::decode::full_parse_with_config(data, &config)
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
     build_parse_result_dict(py, parsed)
 }
 
 #[pyfunction]
-fn parse_fit(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+#[pyo3(signature = (path, columns=None))]
+fn parse_fit(py: Python<'_>, path: &str, columns: Option<Vec<String>>) -> PyResult<PyObject> {
     let data = std::fs::read(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-    do_parse(py, &data)
+    do_parse(py, &data, columns)
 }
 
 #[pyfunction]
-fn parse_fit_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
-    do_parse(py, data)
+#[pyo3(signature = (data, columns=None))]
+fn parse_fit_bytes(py: Python<'_>, data: &[u8], columns: Option<Vec<String>>) -> PyResult<PyObject> {
+    do_parse(py, data, columns)
 }
 
 /// Metadata-only scan from file path — skips Record data.

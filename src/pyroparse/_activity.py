@@ -14,13 +14,39 @@ from pyroparse._schema import select_columns
 from pyroparse._types import PathSource, Source
 
 
-def _call_parser(source: Source) -> dict:
+def _call_parser(source: Source, columns: list[str] | None = None) -> dict:
     """Route to the path-based or bytes-based Rust parser."""
     if isinstance(source, (str, os.PathLike)):
-        return _parse_fit(str(os.fspath(source)))
+        return _parse_fit(str(os.fspath(source)), columns)
     if isinstance(source, bytes):
-        return _parse_fit_bytes(source)
-    return _parse_fit_bytes(source.read())
+        return _parse_fit_bytes(source, columns)
+    return _parse_fit_bytes(source.read(), columns)
+
+
+def _build_rust_column_hint(
+    columns: list[str] | str | None,
+    extra_columns: list[str] | None,
+) -> list[str] | None:
+    """Translate Python column selection into a Rust-side hint.
+
+    Returns None (decode everything) when:
+    - columns is None and extra_columns is None (default: standard columns)
+    - columns is "all" (all columns including extras)
+
+    Returns a list when a specific column set is requested, so Rust can
+    skip decoding unwanted fields.
+    """
+    if columns == "all":
+        return None  # Rust decodes everything
+    if columns is None and extra_columns is None:
+        return None  # standard columns — Rust decodes all, Python filters
+    if columns is None and extra_columns is not None:
+        # Standard columns + specific extras — tell Rust about the extras.
+        from pyroparse._schema import STANDARD_COLUMNS
+        return list(STANDARD_COLUMNS) + list(extra_columns)
+    if isinstance(columns, list):
+        return columns
+    return None
 
 
 def _filter_device_columns(meta: ActivityMetadata, data: pa.Table) -> None:
@@ -75,7 +101,10 @@ class Activity:
         missing: str = "raise",
         metadata: dict | None = None,
     ) -> Activity:
-        raw = _call_parser(source)
+        # Build a Rust-side column hint to skip decoding unwanted fields.
+        # None = decode everything, list = decode only these columns.
+        rust_columns = _build_rust_column_hint(columns, extra_columns)
+        raw = _call_parser(source, rust_columns)
         activities = raw["activities"]
         if len(activities) > 1:
             raise MultipleActivitiesError(len(activities))

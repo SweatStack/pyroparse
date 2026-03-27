@@ -30,18 +30,18 @@ Each operation is measured once per file (no repeated iterations) across
 
 | Operation | median | p5 | p95 | max |
 |---|--:|--:|--:|--:|
-| **FIT full parse** | **17 ms** | 5.8 ms | 67 ms | 242 ms |
-| **FIT metadata scan** | **0.59 ms** | 0.22 ms | 2.1 ms | 4.9 ms |
-| **Parquet full load** | **1.3 ms** | 0.87 ms | 2.4 ms | 4.5 ms |
-| **Parquet metadata scan** | **0.18 ms** | 0.15 ms | 0.25 ms | 1.3 ms |
-| **Parquet write** | **1.7 ms** | 0.92 ms | 4.2 ms | 11 ms |
+| **FIT full parse** | **4.3 ms** | 1.4 ms | 19 ms | 91 ms |
+| **FIT metadata scan** | **0.90 ms** | 0.30 ms | 3.4 ms | 11 ms |
+| **Parquet full load** | **0.96 ms** | 0.70 ms | 1.7 ms | 8.3 ms |
+| **Parquet metadata scan** | **0.16 ms** | 0.13 ms | 0.22 ms | 1.1 ms |
+| **Parquet write** | **1.5 ms** | 0.80 ms | 4.0 ms | 17 ms |
 
 ### Parquet vs FIT speedup
 
 | Operation | median speedup |
 |---|--:|
-| Full load | **14x** |
-| Metadata scan | **3x** |
+| Full load | **4x** |
+| Metadata scan | **6x** |
 
 ## FIT parse time vs file size
 
@@ -73,8 +73,8 @@ Loading only `["timestamp", "power"]` instead of all 12 columns:
 
 | Load mode | FIT median | Parquet median |
 |---|--:|--:|
-| All columns | 16 ms | 1.3 ms |
-| Power only | 16 ms | 1.0 ms |
+| All columns | 4.7 ms | 0.96 ms |
+| Power only | 4.5 ms | 0.69 ms |
 
 FIT parse time is nearly identical — the Rust decoder must read the full
 binary stream regardless, and column selection only drops unwanted columns

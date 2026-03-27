@@ -418,16 +418,85 @@ fn decode_field_description(
 }
 
 // ---------------------------------------------------------------------------
+// Parse configuration
+// ---------------------------------------------------------------------------
+
+/// Controls which Record fields are decoded during a full parse.
+///
+/// When `columns` is `None`, all fields are decoded (the default).
+/// When set, only the listed columns are decoded — unwanted standard fields
+/// are skipped, and extra columns are only discovered/decoded if requested.
+pub struct ParseConfig {
+    /// Column names to decode. `None` = all columns.
+    pub columns: Option<Vec<String>>,
+}
+
+impl ParseConfig {
+    /// Build a field-number mask from column names using the profile.
+    /// Returns (standard field mask, decode extras flag).
+    fn build_field_mask(&self) -> ([bool; 256], bool) {
+        let columns = match &self.columns {
+            None => return ([true; 256], true), // decode everything
+            Some(c) if c.is_empty() => return ([true; 256], true),
+            Some(c) => c,
+        };
+
+        let mut mask = [false; 256];
+        let mut decode_extras = false;
+
+        // Always decode timestamp — needed for session splitting and laps.
+        mask[253] = true;
+
+        for col in columns {
+            match col.as_str() {
+                "timestamp" => { mask[253] = true; }
+                "heart_rate" => { mask[3] = true; }
+                "power" => { mask[7] = true; }
+                "cadence" => { mask[4] = true; }
+                "speed" => { mask[6] = true; mask[73] = true; }
+                "latitude" => { mask[0] = true; }
+                "longitude" => { mask[1] = true; }
+                "altitude" => { mask[2] = true; mask[78] = true; }
+                "temperature" => { mask[13] = true; }
+                "distance" => { mask[5] = true; }
+                "smo2" => { mask[57] = true; }
+                "core_temperature" => { mask[139] = true; }
+                // "lap" and "lap_trigger" are synthesized from Lap messages,
+                // not from Record fields — always available.
+                "lap" | "lap_trigger" => {}
+                // Anything else is an extra column or developer field.
+                _ => { decode_extras = true; }
+            }
+        }
+
+        (mask, decode_extras)
+    }
+}
+
+impl Default for ParseConfig {
+    fn default() -> Self {
+        Self { columns: None }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Full parse (records + metadata + laps + extras)
 // ---------------------------------------------------------------------------
 
-/// Fully parse a FIT file, producing the same ParseResult as the
-/// fitparser-based `process_messages`.
+/// Fully parse a FIT file with optional column selection.
 ///
 /// This is a two-pass design:
 /// - Pass 1: scan definitions to discover extra columns + collect metadata
 /// - Pass 2: decode Record fields into RecordRow + fill extra columns
+///
+/// When `config.columns` is set, only the requested fields are decoded.
 pub fn full_parse(data: &[u8]) -> Result<ParseResult, String> {
+    full_parse_with_config(data, &ParseConfig::default())
+}
+
+/// Full parse with explicit configuration.
+pub fn full_parse_with_config(data: &[u8], config: &ParseConfig) -> Result<ParseResult, String> {
+    let (field_mask, decode_extras) = config.build_field_mask();
     // ── Pass 1: metadata + extra column discovery ────────────────────────
     let mut reader = FitReader::new(data).map_err(|e| e.to_string())?;
 
@@ -453,6 +522,7 @@ pub fn full_parse(data: &[u8]) -> Result<ParseResult, String> {
             FitEvent::Definition { local, global_message_number } => {
                 if global_message_number == profile::MESG_RECORD {
                     if let Some(def) = reader.def(local) {
+                        if decode_extras {
                         // Discover extra columns from field definitions.
                         for field in &def.fields {
                             if field_to_extra.contains_key(&field.number) {
@@ -500,8 +570,6 @@ pub fn full_parse(data: &[u8]) -> Result<ParseResult, String> {
                             if let Some((name, _bt)) = dev_field_names.get(&key) {
                                 if !is_handled_field(name) {
                                     if let Some(col) = column_for_developer_field(name) {
-                                        // Use the base type from the dev field description if available,
-                                        // otherwise default to float64.
                                         let dtype = DataType::Float64;
                                         match extra_types.get_mut(&col) {
                                             Some(existing) => *existing = promote_type(existing, &dtype),
@@ -511,6 +579,7 @@ pub fn full_parse(data: &[u8]) -> Result<ParseResult, String> {
                                 }
                             }
                         }
+                        } // if decode_extras
                     }
                 }
             }
@@ -678,98 +747,87 @@ pub fn full_parse(data: &[u8]) -> Result<ParseResult, String> {
 
         let be = def.big_endian;
 
-        // Decode standard record fields.
+        // Decode record fields, skipping unwanted ones based on field_mask.
         for (num, data) in FieldIter::new(def, field_bytes) {
+            if !field_mask[num as usize] && !decode_extras {
+                continue; // skip both standard and extra — nothing to do
+            }
             match num {
-                0 => {
-                    // position_lat (sint32 → degrees)
+                0 if field_mask[0] => {
                     if let Some(v) = read_i32(data, be) {
                         row.latitude = Some(v as f64 * SEMICIRCLE_TO_DEGREES);
                     }
                 }
-                1 => {
-                    // position_long (sint32 → degrees)
+                1 if field_mask[1] => {
                     if let Some(v) = read_i32(data, be) {
                         row.longitude = Some(v as f64 * SEMICIRCLE_TO_DEGREES);
                     }
                 }
-                2 => {
-                    // altitude (uint16, scale 5, offset 500)
+                2 if field_mask[2] => {
                     if let Some(v) = read_u16(data, be) {
                         row.altitude = Some(v as f32 / 5.0 - 500.0);
                     }
                 }
-                3 => {
-                    // heart_rate (uint8)
+                3 if field_mask[3] => {
                     if let Some(v) = read_u8_valid(data) {
                         row.heart_rate = Some(v as i16);
                     }
                 }
-                4 => {
-                    // cadence (uint8)
+                4 if field_mask[4] => {
                     if let Some(v) = read_u8_valid(data) {
                         row.cadence = Some(v as i16);
                     }
                 }
-                5 => {
-                    // distance (uint32, scale 100)
+                5 if field_mask[5] => {
                     if let Some(v) = read_u32(data, be) {
                         row.distance = Some(v as f64 / 100.0);
                     }
                 }
-                6 => {
-                    // speed (uint16, scale 1000)
+                6 if field_mask[6] => {
                     if row.speed.is_none() {
                         if let Some(v) = read_u16(data, be) {
                             row.speed = Some(v as f32 / 1000.0);
                         }
                     }
                 }
-                7 => {
-                    // power (uint16)
+                7 if field_mask[7] => {
                     if let Some(v) = read_u16(data, be) {
                         row.power = Some(v as i16);
                     }
                 }
-                13 => {
-                    // temperature (sint8)
-                    if data.len() >= 1 {
+                13 if field_mask[13] => {
+                    if !data.is_empty() {
                         let v = data[0] as i8;
                         if v != 0x7F { row.temperature = Some(v); }
                     }
                 }
-                73 => {
-                    // enhanced_speed (uint32, scale 1000) — preferred over field 6
+                73 if field_mask[73] => {
                     if let Some(v) = read_u32(data, be) {
                         row.speed = Some(v as f32 / 1000.0);
                     }
                 }
-                78 => {
-                    // enhanced_altitude (uint32, scale 5, offset 500) — preferred over field 2
+                78 if field_mask[78] => {
                     if let Some(v) = read_u32(data, be) {
                         row.altitude = Some(v as f32 / 5.0 - 500.0);
                     }
                 }
-                57 => {
-                    // saturated_hemoglobin_percent (uint16, scale 10) → smo2
+                57 if field_mask[57] => {
                     if let Some(v) = read_u16(data, be) {
                         row.smo2 = Some(v as f32 / 10.0);
                     }
                 }
-                139 => {
-                    // core_temperature (uint16, scale 100) — native field
+                139 if field_mask[139] => {
                     if let Some(v) = read_u16(data, be) {
                         row.core_temperature = Some(v as f32 / 100.0);
                     }
                 }
-                _ => {
-                    // Extra columns — use base type from definition (raw byte).
+                _ if decode_extras => {
+                    // Extra columns — only when requested.
                     if let Some(&col_idx) = field_to_col.get(&num) {
-                        // Get the raw base type from the definition's field layout.
                         let raw_bt = def.fields.iter()
                             .find(|f| f.number == num)
                             .map(|f| f.base_type)
-                            .unwrap_or(0x02); // fallback to uint8
+                            .unwrap_or(0x02);
                         let (scale, offset) = profile::FieldDef::lookup(profile::RECORD_FIELDS, num)
                             .map(|pf| (pf.scale, pf.offset))
                             .unwrap_or((1.0, 0.0));
@@ -778,16 +836,20 @@ pub fn full_parse(data: &[u8]) -> Result<ParseResult, String> {
                         );
                     }
                 }
+                _ => {}
             }
         }
 
-        // Developer fields — special-cased ones go into RecordRow,
-        // others go into extra columns.
+        // Developer fields — special-cased ones (Power, Cadence, core_temp,
+        // smo2) always decoded into RecordRow for merge logic. Extras only
+        // when requested.
         decode_record_dev_fields(def, dev_field_bytes, &dev_field_names, &mut row);
-        decode_record_dev_extras(
-            def, dev_field_bytes, &dev_field_names,
-            &norm_to_col, &mut extra_data, row_idx,
-        );
+        if decode_extras {
+            decode_record_dev_extras(
+                def, dev_field_bytes, &dev_field_names,
+                &norm_to_col, &mut extra_data, row_idx,
+            );
+        }
 
         records.push(row);
         row_idx += 1;
