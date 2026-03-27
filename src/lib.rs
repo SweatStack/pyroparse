@@ -1,4 +1,5 @@
 mod fields;
+mod fit;
 mod reference;
 mod types;
 mod values;

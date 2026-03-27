@@ -1,0 +1,52 @@
+# Profile generator configuration for pyroparse.
+#
+# Controls which messages, fields, and enums from the FIT SDK Profile.xlsx
+# are included in the generated src/fit/profile.rs.
+#
+# Usage:
+#   python scripts/generate_profile.py \
+#       --sdk assets/Profile.xlsx \
+#       --config scripts/profile.toml
+
+sdk_version = "21.171.00"
+
+[messages]
+# Messages to generate field tables for.
+# Each gets: a MESG_* constant + a *_FIELDS const slice of FieldDef.
+include = [
+    "file_id",
+    "activity",
+    "session",
+    "lap",
+    "record",
+    "event",
+    "device_info",
+    "developer_data_id",
+    "field_description",
+]
+
+[enums]
+# Enum types to generate name-mapping functions for.
+# Each gets: a fn {name}_name(val) -> &'static str.
+include = [
+    "sport",
+    "sub_sport",
+    "manufacturer",
+    "garmin_product",
+    "antplus_device_type",
+    "device_type",             # alias: local_device_type in some SDK versions
+    "source_type",
+    "event",
+    "event_type",
+    "lap_trigger",
+    "session_trigger",
+    "activity",
+    "file",
+    "mesg_num",
+    "swim_stroke",
+    "activity_type",
+    "intensity",
+    "left_right_balance",
+    "left_right_balance_100",
+    "fit_base_type",
+]

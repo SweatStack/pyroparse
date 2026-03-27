@@ -1,6 +1,6 @@
 unexport CONDA_PREFIX
 
-.PHONY: test build benchmark benchmark_http server build_server publish publish-test
+.PHONY: test build benchmark benchmark_http server build_server publish generate-profile
 
 test:
 	uv run python -m pytest tests/ -v $(pytestargs)
@@ -30,3 +30,6 @@ publish:
 	rm -rf dist/
 	uv build
 	uvx twine upload dist/* --verbose
+
+generate-profile:
+	uv run --with openpyxl --with tomli python scripts/generate_profile.py
