@@ -128,10 +128,10 @@ const COLUMN_ATTRIBUTIONS: &[ColumnAttribution] = &[
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
-struct DeveloperSensor {
-    manufacturer: String,
-    product: String,
-    columns: Vec<String>,
+pub(crate) struct DeveloperSensor {
+    pub(crate) manufacturer: String,
+    pub(crate) product: String,
+    pub(crate) columns: Vec<String>,
 }
 
 /// Known CIQ app UUIDs → (manufacturer, product).
@@ -147,7 +147,7 @@ const KNOWN_CIQ_APPS: &[(&str, &str, &str)] = &[
 ];
 
 /// Format 16 raw bytes as a lowercase UUID string (RFC 4122).
-fn bytes_to_uuid(bytes: &[u8]) -> Option<String> {
+pub(crate) fn bytes_to_uuid(bytes: &[u8]) -> Option<String> {
     if bytes.len() < 16 {
         return None;
     }
@@ -180,7 +180,7 @@ fn value_to_uuid(val: &Value) -> Option<String> {
 
 /// Look up a CIQ app UUID → (manufacturer, product).  Returns the UUID
 /// itself as both manufacturer and product for unknown apps.
-fn name_for_uuid(uuid: &str) -> (&str, &str) {
+pub(crate) fn name_for_uuid(uuid: &str) -> (&str, &str) {
     for &(u, mfr, product) in KNOWN_CIQ_APPS {
         if u.eq_ignore_ascii_case(uuid) {
             return (mfr, product);
@@ -226,7 +226,7 @@ fn column_for_developer_field(name: &str) -> Option<String> {
 /// When `include_columns` is true, each sensor's `columns` list is populated
 /// with the output column names that appear in the data.  When false (metadata-
 /// only scan), sensors are classified but columns are left empty.
-fn classify_developer_sensors(
+pub(crate) fn classify_developer_sensors(
     dev_field_owners: &BTreeMap<String, String>,
     present_extra_columns: &BTreeSet<String>,
     include_columns: bool,
@@ -288,28 +288,28 @@ struct RecordRow {
 }
 
 #[derive(Default)]
-struct SessionMeta {
-    sport: Option<String>,
-    sub_sport: Option<String>,
-    name: Option<String>,
-    start_time: Option<f64>,
-    start_time_local: Option<f64>,
-    duration: Option<f64>,
-    distance: Option<f64>,
-    start_timestamp_us: Option<i64>,
-    end_timestamp_us: Option<i64>,
+pub(crate) struct SessionMeta {
+    pub(crate) sport: Option<String>,
+    pub(crate) sub_sport: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) start_time: Option<f64>,
+    pub(crate) start_time_local: Option<f64>,
+    pub(crate) duration: Option<f64>,
+    pub(crate) distance: Option<f64>,
+    pub(crate) start_timestamp_us: Option<i64>,
+    pub(crate) end_timestamp_us: Option<i64>,
 }
 
 #[derive(Clone, Default)]
-struct DeviceMeta {
-    manufacturer: Option<String>,
-    product: Option<String>,
-    serial_number: Option<String>,
-    device_index: Option<u8>,
+pub(crate) struct DeviceMeta {
+    pub(crate) manufacturer: Option<String>,
+    pub(crate) product: Option<String>,
+    pub(crate) serial_number: Option<String>,
+    pub(crate) device_index: Option<u8>,
     /// ANT+ device type from DeviceInfo (e.g. 11 = bike_power, 120 = heart_rate).
-    ant_device_type: Option<u8>,
+    pub(crate) ant_device_type: Option<u8>,
     /// Columns attributed to this device (populated per-session during merge).
-    columns: Vec<String>,
+    pub(crate) columns: Vec<String>,
 }
 
 /// A lap boundary extracted from a FIT Lap message.
@@ -1326,19 +1326,19 @@ struct MesgDef {
 }
 
 #[derive(Default)]
-struct ScanResult {
-    sessions: Vec<SessionMeta>,
-    devices: Vec<DeviceMeta>,
-    local_timestamp: Option<f64>,
-    record_metrics: Vec<String>,
-    developer_sensors: Vec<DeveloperSensor>,
+pub(crate) struct ScanResult {
+    pub(crate) sessions: Vec<SessionMeta>,
+    pub(crate) devices: Vec<DeviceMeta>,
+    pub(crate) local_timestamp: Option<f64>,
+    pub(crate) record_metrics: Vec<String>,
+    pub(crate) developer_sensors: Vec<DeveloperSensor>,
 }
 
 // ---------------------------------------------------------------------------
 // Binary scanner implementation
 // ---------------------------------------------------------------------------
 
-struct FitScanner<'a> {
+pub(crate) struct FitScanner<'a> {
     buf: &'a [u8],
     pos: usize,
     end: usize,
@@ -1346,7 +1346,7 @@ struct FitScanner<'a> {
 }
 
 impl<'a> FitScanner<'a> {
-    fn new(buf: &'a [u8]) -> Result<Self, String> {
+    pub(crate) fn new(buf: &'a [u8]) -> Result<Self, String> {
         if buf.len() < 12 { return Err("File too short for FIT header".into()); }
         if &buf[8..12] != b".FIT" { return Err("Missing .FIT signature".into()); }
         let header_size = buf[0] as usize;
@@ -1356,7 +1356,7 @@ impl<'a> FitScanner<'a> {
         Ok(Self { buf, pos: header_size, end, defs: Default::default() })
     }
 
-    fn scan(&mut self) -> Result<ScanResult, String> {
+    pub(crate) fn scan(&mut self) -> Result<ScanResult, String> {
         let mut result = ScanResult::default();
         let mut metric_set = std::collections::HashSet::new();
         let mut current_app_for_idx: BTreeMap<u8, String> = BTreeMap::new();
@@ -1778,9 +1778,8 @@ fn parse_fit_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
 fn parse_fit_metadata(py: Python<'_>, path: &str) -> PyResult<PyObject> {
     let data = std::fs::read(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-    let mut scanner =
-        FitScanner::new(&data).map_err(pyo3::exceptions::PyValueError::new_err)?;
-    let result = scanner.scan().map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let result = fit::decode::scan_metadata(&data)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
     build_scan_result_dict(py, &result)
 }
 
