@@ -29,4 +29,4 @@ build_server:
 publish:
 	rm -rf dist/
 	uv build
-	uv publish
+	uvx twine upload dist/* --verbose
