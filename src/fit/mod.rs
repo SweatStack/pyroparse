@@ -5,6 +5,8 @@
 //!
 //! ## Modules
 //!
+//! - `binary` — Zero-knowledge binary reader (headers, definitions, data)
 //! - `profile` — Auto-generated message/field/enum definitions from FIT SDK
 
+pub mod binary;
 pub mod profile;
