@@ -31,7 +31,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 /// Semicircles → degrees: 180 / 2^31.
-const SEMICIRCLE_TO_DEGREES: f64 = 180.0 / 2_147_483_648.0;
+pub(crate) const SEMICIRCLE_TO_DEGREES: f64 = 180.0 / 2_147_483_648.0;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Full parser — decodes every message via the fitparser crate
@@ -205,7 +205,7 @@ fn developer_field_to_fixed(name: &str) -> Option<&'static str> {
 
 /// Determine the output column name for a developer field.
 /// Returns None if the field would collide with a standard column and gets skipped.
-fn column_for_developer_field(name: &str) -> Option<String> {
+pub(crate) fn column_for_developer_field(name: &str) -> Option<String> {
     if let Some(norm) = developer_field_to_fixed(name) {
         return Some(norm.to_string());
     }
@@ -266,25 +266,25 @@ pub(crate) fn classify_developer_sensors(
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Default)]
-struct RecordRow {
-    timestamp: Option<i64>,
-    heart_rate: Option<i16>,
-    power: Option<i16>,
-    cadence: Option<i16>,
-    speed: Option<f32>,
-    latitude: Option<f64>,
-    longitude: Option<f64>,
-    altitude: Option<f32>,
-    temperature: Option<i8>,
-    distance: Option<f64>,
+pub(crate) struct RecordRow {
+    pub(crate) timestamp: Option<i64>,
+    pub(crate) heart_rate: Option<i16>,
+    pub(crate) power: Option<i16>,
+    pub(crate) cadence: Option<i16>,
+    pub(crate) speed: Option<f32>,
+    pub(crate) latitude: Option<f64>,
+    pub(crate) longitude: Option<f64>,
+    pub(crate) altitude: Option<f32>,
+    pub(crate) temperature: Option<i8>,
+    pub(crate) distance: Option<f64>,
     // Canonical columns kept in struct for developer field merge,
     // but emitted as extras (not part of the 10 standard columns).
-    core_temperature: Option<f32>,
-    smo2: Option<f32>,
+    pub(crate) core_temperature: Option<f32>,
+    pub(crate) smo2: Option<f32>,
     // Developer shadow fields — kept separate from standard fields so
     // we can pick the winner per-session after slicing.
-    dev_power: Option<i16>,
-    dev_cadence: Option<i16>,
+    pub(crate) dev_power: Option<i16>,
+    pub(crate) dev_cadence: Option<i16>,
 }
 
 #[derive(Default)]
@@ -313,29 +313,29 @@ pub(crate) struct DeviceMeta {
 }
 
 /// A lap boundary extracted from a FIT Lap message.
-struct LapBoundary {
-    start_time_us: i64,
-    end_time_us: i64,
-    trigger: Option<String>,
+pub(crate) struct LapBoundary {
+    pub(crate) start_time_us: i64,
+    pub(crate) end_time_us: i64,
+    pub(crate) trigger: Option<String>,
 }
 
-struct ParseResult {
-    records: Vec<RecordRow>,
-    extra_col_info: Vec<(String, DataType)>,
-    extra_data: Vec<TypedColumn>,
-    sessions: Vec<SessionMeta>,
+pub(crate) struct ParseResult {
+    pub(crate) records: Vec<RecordRow>,
+    pub(crate) extra_col_info: Vec<(String, DataType)>,
+    pub(crate) extra_data: Vec<TypedColumn>,
+    pub(crate) sessions: Vec<SessionMeta>,
     /// All DeviceInfo entries, in order of appearance.  Split into per-session
     /// groups using `split_devices_per_session` before building output.
-    devices: Vec<DeviceMeta>,
-    developer_sensors: Vec<DeveloperSensor>,
-    laps: Vec<LapBoundary>,
+    pub(crate) devices: Vec<DeviceMeta>,
+    pub(crate) developer_sensors: Vec<DeveloperSensor>,
+    pub(crate) laps: Vec<LapBoundary>,
 }
 
 // ---------------------------------------------------------------------------
 // Message processing (shared by path and bytes entry points)
 // ---------------------------------------------------------------------------
 
-fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
+pub(crate) fn process_messages(messages: &[fitparser::FitDataRecord]) -> ParseResult {
     let mut sessions = Vec::new();
     let mut devices = Vec::new();
     let mut laps = Vec::new();
@@ -1757,7 +1757,8 @@ fn build_scan_result_dict(py: Python<'_>, scan: &ScanResult) -> PyResult<PyObjec
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn do_parse(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
-    let parsed = parse_all_from_bytes(data)?;
+    let parsed = fit::decode::full_parse(data)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
     build_parse_result_dict(py, parsed)
 }
 

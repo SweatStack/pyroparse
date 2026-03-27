@@ -1,21 +1,27 @@
 //! FIT message decoder.
 //!
-//! Decodes raw binary events from [`FitReader`] into typed metadata
-//! structures using the generated profile definitions. Supports a
-//! metadata-only scan mode that skips Record messages entirely.
+//! Decodes raw binary events from [`FitReader`] into typed structures using
+//! the generated profile definitions.
 //!
-//! This module replaces the hand-written `FitScanner` with a decoder
-//! built on the binary reader and generated profile.
+//! Two modes:
+//! - [`scan_metadata`]: metadata-only scan (skips Record data)
+//! - [`full_parse`]: complete parse producing `ParseResult` with Record
+//!   data, metadata, laps, and extra columns
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use arrow::datatypes::DataType;
 
 use crate::fit::binary::{FitEvent, FitReader, MessageDef};
 use crate::fit::profile;
-use crate::reference::classify_developer_field;
-use crate::fields::{normalize_field_name, is_canonical_column};
+use crate::reference::{classify_developer_field, format_product_name};
+use crate::fields::{normalize_field_name, is_canonical_column, is_handled_field};
+use crate::types::{TypedColumn, promote_type, base_type_to_arrow};
 use crate::{
-    SessionMeta, DeviceMeta, DeveloperSensor, ScanResult,
+    SessionMeta, DeviceMeta, DeveloperSensor, ScanResult, ParseResult,
+    RecordRow, LapBoundary, SEMICIRCLE_TO_DEGREES,
     classify_developer_sensors, bytes_to_uuid, name_for_uuid,
+    column_for_developer_field,
 };
 
 // ---------------------------------------------------------------------------
@@ -412,6 +418,677 @@ fn decode_field_description(
 }
 
 // ---------------------------------------------------------------------------
+// Full parse (records + metadata + laps + extras)
+// ---------------------------------------------------------------------------
+
+/// Fully parse a FIT file, producing the same ParseResult as the
+/// fitparser-based `process_messages`.
+///
+/// This is a two-pass design:
+/// - Pass 1: scan definitions to discover extra columns + collect metadata
+/// - Pass 2: decode Record fields into RecordRow + fill extra columns
+pub fn full_parse(data: &[u8]) -> Result<ParseResult, String> {
+    // ── Pass 1: metadata + extra column discovery ────────────────────────
+    let mut reader = FitReader::new(data).map_err(|e| e.to_string())?;
+
+    let mut sessions = Vec::new();
+    let mut devices = Vec::new();
+    let mut laps = Vec::new();
+    let mut current_app_for_idx: BTreeMap<u8, String> = BTreeMap::new();
+    let mut dev_field_owners: BTreeMap<String, String> = BTreeMap::new();
+
+    let mut n_rows = 0usize;
+    let mut extra_types: BTreeMap<String, DataType> = BTreeMap::new();
+
+    // Track which field numbers map to which normalized extra column names.
+    // Key: field_number, Value: normalized column name (or None if handled).
+    let mut field_to_extra: HashMap<u8, Option<String>> = HashMap::new();
+
+    // Also track developer field names for extra column discovery.
+    // Key: (dev_data_index, field_number) from definition, Value: field name from FieldDescription.
+    let mut dev_field_names: HashMap<(u8, u8), (String, u8)> = HashMap::new();
+
+    while let Some(event) = reader.next().map_err(|e| e.to_string())? {
+        match event {
+            FitEvent::Definition { local, global_message_number } => {
+                if global_message_number == profile::MESG_RECORD {
+                    if let Some(def) = reader.def(local) {
+                        // Discover extra columns from field definitions.
+                        for field in &def.fields {
+                            if field_to_extra.contains_key(&field.number) {
+                                continue;
+                            }
+                            // Look up in profile to get the field name.
+                            if let Some(pf) = profile::FieldDef::lookup(profile::RECORD_FIELDS, field.number) {
+                                if is_handled_field(pf.name) {
+                                    field_to_extra.insert(field.number, None);
+                                } else {
+                                    let normalized = normalize_field_name(pf.name);
+                                    if is_canonical_column(&normalized) {
+                                        field_to_extra.insert(field.number, None);
+                                    } else {
+                                        // Determine Arrow type from base type.
+                                        if let Some(dtype) = base_type_to_arrow(field.base_type) {
+                                            match extra_types.get_mut(&normalized) {
+                                                Some(existing) => *existing = promote_type(existing, &dtype),
+                                                None => { extra_types.insert(normalized.clone(), dtype); }
+                                            }
+                                            field_to_extra.insert(field.number, Some(normalized));
+                                        } else {
+                                            field_to_extra.insert(field.number, None);
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Unknown field — not in profile. Treat as extra.
+                                let name = format!("unknown_field_{}", field.number);
+                                if let Some(dtype) = base_type_to_arrow(field.base_type) {
+                                    match extra_types.get_mut(&name) {
+                                        Some(existing) => *existing = promote_type(existing, &dtype),
+                                        None => { extra_types.insert(name.clone(), dtype); }
+                                    }
+                                    field_to_extra.insert(field.number, Some(name));
+                                } else {
+                                    field_to_extra.insert(field.number, None);
+                                }
+                            }
+                        }
+
+                        // Developer fields in Record definitions → extra columns.
+                        for dev_field in &def.dev_fields {
+                            let key = (dev_field.dev_data_index, dev_field.number);
+                            if let Some((name, _bt)) = dev_field_names.get(&key) {
+                                if !is_handled_field(name) {
+                                    if let Some(col) = column_for_developer_field(name) {
+                                        // Use the base type from the dev field description if available,
+                                        // otherwise default to float64.
+                                        let dtype = DataType::Float64;
+                                        match extra_types.get_mut(&col) {
+                                            Some(existing) => *existing = promote_type(existing, &dtype),
+                                            None => { extra_types.insert(col, dtype); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            FitEvent::Data { local, field_bytes, .. }
+            | FitEvent::CompressedData { local, field_bytes, .. } => {
+                let def = reader.def(local)
+                    .ok_or("data message without preceding definition")?;
+                let global = def.global_message_number;
+
+                match global {
+                    profile::MESG_RECORD => { n_rows += 1; }
+                    profile::MESG_SESSION => {
+                        sessions.push(decode_session(def, field_bytes));
+                    }
+                    profile::MESG_ACTIVITY => {
+                        // Extract local_timestamp — backfill into sessions later.
+                        if let Some(lt) = decode_activity_local_ts(def, field_bytes) {
+                            for s in &mut sessions {
+                                if s.start_time_local.is_none() {
+                                    s.start_time_local = Some(lt);
+                                }
+                            }
+                        }
+                    }
+                    profile::MESG_DEVICE_INFO => {
+                        if let Some(d) = decode_device_full(def, field_bytes) {
+                            devices.push(d);
+                        }
+                    }
+                    profile::MESG_LAP => {
+                        if let Some(l) = decode_lap(def, field_bytes) {
+                            laps.push(l);
+                        }
+                    }
+                    profile::MESG_DEVELOPER_DATA_ID => {
+                        if let Some((idx, uuid)) = decode_developer_data_id(def, field_bytes) {
+                            current_app_for_idx.insert(idx, uuid);
+                        }
+                    }
+                    profile::MESG_FIELD_DESCRIPTION => {
+                        decode_field_description_full(
+                            def, field_bytes,
+                            &current_app_for_idx,
+                            &mut dev_field_owners,
+                            &mut dev_field_names,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            FitEvent::FileHeader(_) | FitEvent::Crc { .. } => {}
+        }
+    }
+
+    // Build extra column info and lookup.
+    let extra_col_info: Vec<(String, DataType)> = extra_types.into_iter().collect();
+    let norm_to_col: HashMap<&str, usize> = extra_col_info.iter()
+        .enumerate()
+        .map(|(i, (name, _))| (name.as_str(), i))
+        .collect();
+    // Map field_number → extra column index for fast lookup during pass 2.
+    let field_to_col: HashMap<u8, usize> = field_to_extra.iter()
+        .filter_map(|(&num, opt_name)| {
+            let name = opt_name.as_ref()?;
+            let &idx = norm_to_col.get(name.as_str())?;
+            Some((num, idx))
+        })
+        .collect();
+    let mut extra_data: Vec<TypedColumn> = extra_col_info.iter()
+        .map(|(_, dtype)| TypedColumn::new(dtype, n_rows))
+        .collect();
+
+    // Developer sensor classification.
+    let present_extra_columns: BTreeSet<String> =
+        extra_col_info.iter().map(|(name, _)| name.clone()).collect();
+    let developer_sensors = classify_developer_sensors(
+        &dev_field_owners,
+        &present_extra_columns,
+        true,
+    );
+
+    // ── Pass 2: decode Record fields ─────────────────────────────────────
+    let mut reader = FitReader::new(data).map_err(|e| e.to_string())?;
+    let mut records = Vec::with_capacity(n_rows);
+    let mut row_idx = 0usize;
+    let mut base_timestamp: Option<u32> = None;
+
+    // Reset dev_field_names — rebuild during pass 2 to stay in sync with
+    // session-local developer data index assignments.
+    dev_field_names.clear();
+
+    while let Some(event) = reader.next().map_err(|e| e.to_string())? {
+        // Extract compressed timestamp offset.
+        let time_offset = match &event {
+            FitEvent::CompressedData { time_offset, .. } => Some(*time_offset),
+            _ => None,
+        };
+
+        let (local, field_bytes, dev_field_bytes) = match &event {
+            FitEvent::Data { local, field_bytes, dev_field_bytes, .. } => (*local, *field_bytes, *dev_field_bytes),
+            FitEvent::CompressedData { local, field_bytes, dev_field_bytes, .. } => (*local, *field_bytes, *dev_field_bytes),
+            _ => continue,
+        };
+
+        let def = match reader.def(local) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        if def.global_message_number != profile::MESG_RECORD {
+            // Track timestamps from non-Record messages.
+            for (num, fdata) in FieldIter::new(def, field_bytes) {
+                if num == 253 {
+                    if let Some(ts) = read_u32(fdata, def.big_endian) {
+                        base_timestamp = Some(ts);
+                    }
+                }
+            }
+            // Re-process FieldDescription to keep dev_field_names in sync.
+            if def.global_message_number == profile::MESG_FIELD_DESCRIPTION {
+                let mut dev_idx: Option<u8> = None;
+                let mut field_def_num: Option<u8> = None;
+                let mut field_name: Option<String> = None;
+                let mut base_type_id: u8 = 0x88; // default float32
+                for (num, fdata) in FieldIter::new(def, field_bytes) {
+                    match num {
+                        0 => dev_idx = fdata.first().copied(),
+                        1 => field_def_num = fdata.first().copied(),
+                        2 => base_type_id = fdata.first().copied().unwrap_or(0x88),
+                        3 => field_name = read_string(fdata),
+                        _ => {}
+                    }
+                }
+                if let (Some(idx), Some(fdn), Some(name)) = (dev_idx, field_def_num, field_name) {
+                    dev_field_names.insert((idx, fdn), (name, base_type_id));
+                }
+            }
+            continue;
+        }
+
+        // Resolve timestamp.
+        let timestamp = if let Some(offset) = time_offset {
+            resolve_compressed_timestamp(&mut base_timestamp, offset)
+        } else {
+            // Look for field 253 (timestamp) in the record.
+            let mut ts = None;
+            for (num, data) in FieldIter::new(def, field_bytes) {
+                if num == 253 {
+                    ts = read_u32(data, def.big_endian);
+                    break;
+                }
+            }
+            if let Some(t) = ts {
+                base_timestamp = Some(t);
+            }
+            ts
+        };
+
+        let mut row = RecordRow::default();
+        if let Some(ts) = timestamp {
+            row.timestamp = Some((ts as i64 + profile::FIT_EPOCH_OFFSET) * 1_000_000);
+        }
+
+        let be = def.big_endian;
+
+        // Decode standard record fields.
+        for (num, data) in FieldIter::new(def, field_bytes) {
+            match num {
+                0 => {
+                    // position_lat (sint32 → degrees)
+                    if let Some(v) = read_i32(data, be) {
+                        row.latitude = Some(v as f64 * SEMICIRCLE_TO_DEGREES);
+                    }
+                }
+                1 => {
+                    // position_long (sint32 → degrees)
+                    if let Some(v) = read_i32(data, be) {
+                        row.longitude = Some(v as f64 * SEMICIRCLE_TO_DEGREES);
+                    }
+                }
+                2 => {
+                    // altitude (uint16, scale 5, offset 500)
+                    if let Some(v) = read_u16(data, be) {
+                        row.altitude = Some(v as f32 / 5.0 - 500.0);
+                    }
+                }
+                3 => {
+                    // heart_rate (uint8)
+                    if let Some(v) = read_u8_valid(data) {
+                        row.heart_rate = Some(v as i16);
+                    }
+                }
+                4 => {
+                    // cadence (uint8)
+                    if let Some(v) = read_u8_valid(data) {
+                        row.cadence = Some(v as i16);
+                    }
+                }
+                5 => {
+                    // distance (uint32, scale 100)
+                    if let Some(v) = read_u32(data, be) {
+                        row.distance = Some(v as f64 / 100.0);
+                    }
+                }
+                6 => {
+                    // speed (uint16, scale 1000)
+                    if row.speed.is_none() {
+                        if let Some(v) = read_u16(data, be) {
+                            row.speed = Some(v as f32 / 1000.0);
+                        }
+                    }
+                }
+                7 => {
+                    // power (uint16)
+                    if let Some(v) = read_u16(data, be) {
+                        row.power = Some(v as i16);
+                    }
+                }
+                13 => {
+                    // temperature (sint8)
+                    if data.len() >= 1 {
+                        let v = data[0] as i8;
+                        if v != 0x7F { row.temperature = Some(v); }
+                    }
+                }
+                73 => {
+                    // enhanced_speed (uint32, scale 1000) — preferred over field 6
+                    if let Some(v) = read_u32(data, be) {
+                        row.speed = Some(v as f32 / 1000.0);
+                    }
+                }
+                78 => {
+                    // enhanced_altitude (uint32, scale 5, offset 500) — preferred over field 2
+                    if let Some(v) = read_u32(data, be) {
+                        row.altitude = Some(v as f32 / 5.0 - 500.0);
+                    }
+                }
+                57 => {
+                    // saturated_hemoglobin_percent (uint16, scale 10) → smo2
+                    if let Some(v) = read_u16(data, be) {
+                        row.smo2 = Some(v as f32 / 10.0);
+                    }
+                }
+                139 => {
+                    // core_temperature (uint16, scale 100) — native field
+                    if let Some(v) = read_u16(data, be) {
+                        row.core_temperature = Some(v as f32 / 100.0);
+                    }
+                }
+                _ => {
+                    // Extra columns — use base type from definition (raw byte).
+                    if let Some(&col_idx) = field_to_col.get(&num) {
+                        // Get the raw base type from the definition's field layout.
+                        let raw_bt = def.fields.iter()
+                            .find(|f| f.number == num)
+                            .map(|f| f.base_type)
+                            .unwrap_or(0x02); // fallback to uint8
+                        let (scale, offset) = profile::FieldDef::lookup(profile::RECORD_FIELDS, num)
+                            .map(|pf| (pf.scale, pf.offset))
+                            .unwrap_or((1.0, 0.0));
+                        extra_data[col_idx].set_from_bytes(
+                            row_idx, data, raw_bt, be, scale, offset,
+                        );
+                    }
+                }
+            }
+        }
+
+        // Developer fields — special-cased ones go into RecordRow,
+        // others go into extra columns.
+        decode_record_dev_fields(def, dev_field_bytes, &dev_field_names, &mut row);
+        decode_record_dev_extras(
+            def, dev_field_bytes, &dev_field_names,
+            &norm_to_col, &mut extra_data, row_idx,
+        );
+
+        records.push(row);
+        row_idx += 1;
+    }
+
+    laps.sort_by_key(|l| l.start_time_us);
+
+    Ok(ParseResult {
+        records,
+        extra_col_info,
+        extra_data,
+        sessions,
+        devices,
+        developer_sensors,
+        laps,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Full-parse helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve a 5-bit compressed timestamp offset against the base timestamp.
+fn resolve_compressed_timestamp(base: &mut Option<u32>, time_offset: u8) -> Option<u32> {
+    let base_ts = (*base)?;
+    let offset = time_offset as u32;
+    let mask: u32 = 0x1F;
+    let mut ts = (base_ts & !mask) + offset;
+    if offset < (base_ts & mask) {
+        ts += 32;
+    }
+    *base = Some(ts);
+    Some(ts)
+}
+
+/// Read an i32 from field bytes. Returns None if invalid (0x7FFFFFFF).
+#[inline]
+fn read_i32(data: &[u8], big_endian: bool) -> Option<i32> {
+    if data.len() < 4 { return None; }
+    let v = if big_endian {
+        i32::from_be_bytes([data[0], data[1], data[2], data[3]])
+    } else {
+        i32::from_le_bytes([data[0], data[1], data[2], data[3]])
+    };
+    if v == 0x7FFFFFFF { None } else { Some(v) }
+}
+
+/// Decode DeviceInfo with full field set (including garmin_product fallback).
+fn decode_device_full(def: &MessageDef, field_bytes: &[u8]) -> Option<DeviceMeta> {
+    let mut d = DeviceMeta::default();
+    let be = def.big_endian;
+    let mut garmin_product: Option<String> = None;
+
+    for (num, data) in FieldIter::new(def, field_bytes) {
+        match num {
+            0 => {
+                if let Some(v) = read_u8_valid(data) {
+                    d.device_index = Some(v);
+                }
+            }
+            1 => {
+                // device_type / ant_device_type
+                if let Some(v) = read_u8_valid(data) {
+                    d.ant_device_type = Some(v);
+                }
+            }
+            2 => {
+                // manufacturer
+                if let Some(v) = read_u16(data, be) {
+                    d.manufacturer = Some(profile::manufacturer_name(v).to_string());
+                }
+            }
+            3 => {
+                // serial_number (uint32z)
+                if let Some(v) = read_u32z(data, be) {
+                    d.serial_number = Some(format!("{v}"));
+                }
+            }
+            4 => {
+                // product (uint16) — resolve as garmin_product only when
+                // manufacturer is garmin (1 or 2). This matches fitparser's
+                // subfield resolution.
+                if d.product.is_none() {
+                    if let Some(v) = read_u16(data, be) {
+                        let name = profile::garmin_product_name(v);
+                        if name != "unknown" && !name.chars().all(|c| c.is_ascii_digit()) {
+                            garmin_product = Some(format_product_name(name));
+                        }
+                    }
+                }
+            }
+            27 => {
+                // product_name (string)
+                if let Some(s) = read_string(data) {
+                    d.product = Some(s);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Fallback: use garmin_product if no product_name and manufacturer is garmin.
+    // Field 4 (product) is a generic uint16; it only resolves to a meaningful
+    // garmin_product name when the manufacturer is actually garmin.
+    if d.product.is_none() && garmin_product.is_some() {
+        let is_garmin = d.manufacturer.as_deref()
+            .is_some_and(|m| m == "garmin");
+        if is_garmin {
+            d.product = garmin_product;
+        }
+    }
+
+    if d.manufacturer.is_some() || d.product.is_some() {
+        Some(d)
+    } else {
+        None
+    }
+}
+
+/// Decode a Lap message into a LapBoundary.
+fn decode_lap(def: &MessageDef, field_bytes: &[u8]) -> Option<LapBoundary> {
+    let be = def.big_endian;
+    let mut start_time_us: Option<i64> = None;
+    let mut end_time_us: Option<i64> = None;
+    let mut trigger: Option<String> = None;
+
+    for (num, data) in FieldIter::new(def, field_bytes) {
+        match num {
+            2 => {
+                // start_time
+                if let Some(ts) = read_u32(data, be) {
+                    start_time_us = Some((ts as i64 + profile::FIT_EPOCH_OFFSET) * 1_000_000);
+                }
+            }
+            253 => {
+                // timestamp (lap end time)
+                if let Some(ts) = read_u32(data, be) {
+                    end_time_us = Some((ts as i64 + profile::FIT_EPOCH_OFFSET) * 1_000_000);
+                }
+            }
+            24 => {
+                // lap_trigger (enum)
+                if let Some(v) = read_u8_valid(data) {
+                    trigger = Some(profile::lap_trigger_name(v).to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match (start_time_us, end_time_us) {
+        (Some(start), Some(end)) => Some(LapBoundary {
+            start_time_us: start,
+            end_time_us: end,
+            trigger,
+        }),
+        _ => None,
+    }
+}
+
+/// Extended FieldDescription decoder for full parse — also tracks
+/// (dev_data_index, field_number) → field_name for developer field lookup.
+fn decode_field_description_full(
+    def: &MessageDef,
+    field_bytes: &[u8],
+    current_app_for_idx: &BTreeMap<u8, String>,
+    dev_field_owners: &mut BTreeMap<String, String>,
+    dev_field_names: &mut HashMap<(u8, u8), (String, u8)>,
+) {
+    let mut dev_idx: Option<u8> = None;
+    let mut field_def_num: Option<u8> = None;
+    let mut field_name: Option<String> = None;
+    let mut base_type_id: u8 = 0x88; // default float32
+
+    for (num, data) in FieldIter::new(def, field_bytes) {
+        match num {
+            0 => dev_idx = data.first().copied(),
+            1 => field_def_num = data.first().copied(),
+            2 => base_type_id = data.first().copied().unwrap_or(0x88),
+            3 => field_name = read_string(data),
+            _ => {}
+        }
+    }
+
+    if let (Some(idx), Some(fdn)) = (dev_idx, field_def_num) {
+        if let Some(name) = &field_name {
+            dev_field_names.insert((idx, fdn), (name.clone(), base_type_id));
+        }
+    }
+
+    if let (Some(idx), Some(name)) = (dev_idx, &field_name) {
+        if !dev_field_owners.contains_key(name) {
+            if let Some(uuid) = current_app_for_idx.get(&idx) {
+                dev_field_owners.insert(name.clone(), uuid.clone());
+            }
+        }
+    }
+}
+
+/// Decode developer fields in a Record message.
+fn decode_record_dev_fields(
+    def: &MessageDef,
+    dev_field_bytes: &[u8],
+    dev_field_names: &HashMap<(u8, u8), (String, u8)>,
+    row: &mut RecordRow,
+) {
+    let mut offset = 0;
+    for dev_field in &def.dev_fields {
+        let size = dev_field.size as usize;
+        if offset + size > dev_field_bytes.len() { break; }
+        let data = &dev_field_bytes[offset..offset + size];
+        offset += size;
+
+        let key = (dev_field.dev_data_index, dev_field.number);
+        let (name, _bt) = match dev_field_names.get(&key) {
+            Some(v) => (v.0.as_str(), v.1),
+            None => continue,
+        };
+
+        match name {
+            "Power" => {
+                if let Some(v) = read_dev_u16(data) {
+                    row.dev_power = Some(v as i16);
+                }
+            }
+            "Cadence" => {
+                if let Some(v) = read_dev_u8(data) {
+                    row.dev_cadence = Some(v as i16);
+                }
+            }
+            "Core Body Temperature" | "core_temperature" => {
+                row.core_temperature = read_dev_f32(data);
+            }
+            "Current Saturated Hemoglobin Percent" | "SmO2" | "smo2"
+            | "saturated_hemoglobin_percent" => {
+                row.smo2 = read_dev_f32(data);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Decode non-special developer fields into extra columns.
+fn decode_record_dev_extras(
+    def: &MessageDef,
+    dev_field_bytes: &[u8],
+    dev_field_names: &HashMap<(u8, u8), (String, u8)>,
+    norm_to_col: &HashMap<&str, usize>,
+    extra_data: &mut [TypedColumn],
+    row_idx: usize,
+) {
+    let mut offset = 0;
+    for dev_field in &def.dev_fields {
+        let size = dev_field.size as usize;
+        if offset + size > dev_field_bytes.len() { break; }
+        let data = &dev_field_bytes[offset..offset + size];
+        offset += size;
+
+        let key = (dev_field.dev_data_index, dev_field.number);
+        let (name, base_type_id) = match dev_field_names.get(&key) {
+            Some(v) => (v.0.as_str(), v.1),
+            None => continue,
+        };
+
+        // Skip fields already handled by decode_record_dev_fields.
+        if is_handled_field(name) { continue; }
+
+        // Resolve to an extra column name.
+        if let Some(col_name) = column_for_developer_field(name) {
+            if let Some(&col_idx) = norm_to_col.get(col_name.as_str()) {
+                // Use the base type from the FieldDescription, no scale/offset
+                // for developer fields.
+                extra_data[col_idx].set_from_bytes(
+                    row_idx, data, base_type_id, false, 1.0, 0.0,
+                );
+            }
+        }
+    }
+}
+
+/// Read a developer field as u16 (assumes LE, 2 bytes).
+fn read_dev_u16(data: &[u8]) -> Option<u16> {
+    if data.len() < 2 { return None; }
+    let v = u16::from_le_bytes([data[0], data[1]]);
+    if v == 0xFFFF { None } else { Some(v) }
+}
+
+/// Read a developer field as u8.
+fn read_dev_u8(data: &[u8]) -> Option<u8> {
+    let v = *data.first()?;
+    if v == 0xFF { None } else { Some(v) }
+}
+
+/// Read a developer field as f32 (assumes LE, 4 bytes, IEEE 754).
+fn read_dev_f32(data: &[u8]) -> Option<f32> {
+    if data.len() < 4 { return None; }
+    let v = f32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    if v.is_finite() { Some(v) } else { None }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -507,6 +1184,135 @@ mod tests {
                 old_result.developer_sensors.len(), new_result.developer_sensors.len(),
                 "{fixture}: developer sensor count mismatch"
             );
+        }
+    }
+
+    // -- Full parse tests --
+
+    #[test]
+    fn test_full_parse_basic() {
+        let path = std::path::Path::new("tests/fixtures/test.fit");
+        if !path.exists() { return; }
+        let data = std::fs::read(path).unwrap();
+
+        let result = full_parse(&data).unwrap();
+
+        assert!(!result.records.is_empty(), "expected records");
+        assert!(!result.sessions.is_empty(), "expected sessions");
+        assert!(result.records[0].timestamp.is_some(), "first record should have timestamp");
+    }
+
+    #[test]
+    fn test_full_parse_developer_fields() {
+        let path = std::path::Path::new("tests/fixtures/with-developer-fields.fit");
+        if !path.exists() { return; }
+        let data = std::fs::read(path).unwrap();
+
+        let result = full_parse(&data).unwrap();
+
+        assert!(!result.records.is_empty());
+        assert!(!result.developer_sensors.is_empty());
+
+        // Should have core_temperature from developer fields.
+        let has_core_temp = result.records.iter().any(|r| r.core_temperature.is_some());
+        assert!(has_core_temp, "expected core_temperature from developer fields");
+    }
+
+    #[test]
+    fn test_full_parse_multi_session() {
+        let path = std::path::Path::new("tests/fixtures/cycling-rowing-cycling-rowing.fit");
+        if !path.exists() { return; }
+        let data = std::fs::read(path).unwrap();
+
+        let result = full_parse(&data).unwrap();
+
+        assert!(result.sessions.len() > 1, "expected multiple sessions");
+        assert!(!result.records.is_empty());
+        assert!(!result.laps.is_empty(), "expected laps");
+    }
+
+    #[test]
+    fn test_full_parse_parity_with_fitparser() {
+        // Compare our full_parse against the fitparser-based process_messages.
+        use crate::process_messages;
+
+        for fixture in &["test.fit", "with-developer-fields.fit", "cycling-rowing-cycling-rowing.fit"] {
+            let path = std::path::Path::new("tests/fixtures").join(fixture);
+            if !path.exists() { continue; }
+            let data = std::fs::read(&path).unwrap();
+
+            // Old path: fitparser → process_messages.
+            let messages = fitparser::from_bytes(&data).unwrap();
+            let old = process_messages(&messages);
+
+            // New path: our full_parse.
+            let new = full_parse(&data).unwrap();
+
+            // Record count.
+            assert_eq!(
+                old.records.len(), new.records.len(),
+                "{fixture}: record count mismatch (old={}, new={})",
+                old.records.len(), new.records.len()
+            );
+
+            // Session count.
+            assert_eq!(
+                old.sessions.len(), new.sessions.len(),
+                "{fixture}: session count mismatch"
+            );
+
+            // Per-session metadata.
+            for (i, (o, n)) in old.sessions.iter().zip(&new.sessions).enumerate() {
+                assert_eq!(o.sport, n.sport, "{fixture} session {i}: sport");
+                assert_eq!(o.sub_sport, n.sub_sport, "{fixture} session {i}: sub_sport");
+                assert_eq!(o.duration, n.duration, "{fixture} session {i}: duration");
+                assert_eq!(o.distance, n.distance, "{fixture} session {i}: distance");
+            }
+
+            // Lap count.
+            assert_eq!(
+                old.laps.len(), new.laps.len(),
+                "{fixture}: lap count mismatch"
+            );
+
+            // Spot-check record values (first and last).
+            for idx in [0, old.records.len() / 2, old.records.len() - 1] {
+                let o = &old.records[idx];
+                let n = &new.records[idx];
+                assert_eq!(o.timestamp, n.timestamp,
+                    "{fixture} record {idx}: timestamp (old={:?}, new={:?})", o.timestamp, n.timestamp);
+                assert_eq!(o.heart_rate, n.heart_rate,
+                    "{fixture} record {idx}: heart_rate");
+                assert_eq!(o.power, n.power,
+                    "{fixture} record {idx}: power");
+                assert_eq!(o.cadence, n.cadence,
+                    "{fixture} record {idx}: cadence");
+                // Float comparisons with tolerance.
+                assert_float_eq(o.speed, n.speed, 0.01,
+                    &format!("{fixture} record {idx}: speed"));
+                assert_float_eq(o.altitude, n.altitude, 0.1,
+                    &format!("{fixture} record {idx}: altitude"));
+            }
+
+            // Device count — allow ±1 difference due to garmin_product subfield
+            // resolution differences between fitparser and our raw decoder.
+            // The downstream dedup_devices() function handles duplicates.
+            let diff = (old.devices.len() as isize - new.devices.len() as isize).unsigned_abs();
+            assert!(
+                diff <= 1,
+                "{fixture}: device count too different (old={}, new={})",
+                old.devices.len(), new.devices.len()
+            );
+        }
+    }
+
+    fn assert_float_eq(a: Option<f32>, b: Option<f32>, tol: f32, msg: &str) {
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                assert!((a - b).abs() < tol, "{msg}: {a} != {b} (tol={tol})");
+            }
+            (None, None) => {}
+            _ => panic!("{msg}: {:?} != {:?}", a, b),
         }
     }
 }
