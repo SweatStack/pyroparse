@@ -30,17 +30,17 @@ Each operation is measured once per file (no repeated iterations) across
 
 | Operation | median | p5 | p95 | max |
 |---|--:|--:|--:|--:|
-| **FIT full parse** | **17 ms** | 5.6 ms | 67 ms | 239 ms |
-| **FIT metadata scan** | **0.58 ms** | 0.24 ms | 2.0 ms | 4.7 ms |
-| **Parquet full load** | **1.3 ms** | 0.88 ms | 2.4 ms | 5.0 ms |
-| **Parquet metadata scan** | **0.18 ms** | 0.15 ms | 0.24 ms | 1.9 ms |
-| **Parquet write** | **1.7 ms** | 0.90 ms | 4.5 ms | 103 ms |
+| **FIT full parse** | **17 ms** | 5.8 ms | 67 ms | 242 ms |
+| **FIT metadata scan** | **0.59 ms** | 0.22 ms | 2.1 ms | 4.9 ms |
+| **Parquet full load** | **1.3 ms** | 0.87 ms | 2.4 ms | 4.5 ms |
+| **Parquet metadata scan** | **0.18 ms** | 0.15 ms | 0.25 ms | 1.3 ms |
+| **Parquet write** | **1.7 ms** | 0.92 ms | 4.2 ms | 11 ms |
 
 ### Parquet vs FIT speedup
 
 | Operation | median speedup |
 |---|--:|
-| Full load | **13x** |
+| Full load | **14x** |
 | Metadata scan | **3x** |
 
 ## FIT parse time vs file size
