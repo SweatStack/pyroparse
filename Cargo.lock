@@ -900,6 +900,17 @@ dependencies = [
  "fitparser",
  "pyo3",
  "pyo3-arrow",
+ "pythonize",
+]
+
+[[package]]
+name = "pythonize"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90fcf491425978bd889015d5430f6473d91bdfa2097262f1e731aadcf6c2113e"
+dependencies = [
+ "pyo3",
+ "serde",
 ]
 
 [[package]]

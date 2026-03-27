@@ -1,8 +1,9 @@
-"""CLI entry point: ``pyroparse convert`` and ``python -m pyroparse``."""
+"""CLI entry point: ``pyroparse convert``, ``pyroparse dump``, and ``python -m pyroparse``."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
 
+    # -- convert ---------------------------------------------------------------
     convert = sub.add_parser(
         "convert",
         help="convert FIT files to Parquet",
@@ -27,11 +29,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="FIT file or directory of FIT files",
     )
     convert.add_argument(
-        "dst",
+        "-o", "--output",
         type=Path,
-        nargs="?",
         default=None,
-        help="output file or directory (default: in-place, next to source)",
+        metavar="PATH",
+        help="output file or directory (default: .parquet next to source)",
     )
     convert.add_argument(
         "--overwrite",
@@ -57,12 +59,49 @@ def _build_parser() -> argparse.ArgumentParser:
         help="disable the progress bar",
     )
 
+    # -- dump ------------------------------------------------------------------
+    dump = sub.add_parser(
+        "dump",
+        help="dump raw FIT messages as JSON",
+        description="Dump every message in a FIT file as JSON. No pyroparse opinions applied.",
+    )
+    dump.add_argument(
+        "src",
+        type=Path,
+        help="FIT file to dump",
+    )
+    dump.add_argument(
+        "-o", "--output",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="write to file instead of stdout",
+    )
+    kind_group = dump.add_mutually_exclusive_group()
+    kind_group.add_argument(
+        "--kind",
+        default=None,
+        metavar="TYPE[,TYPE,...]",
+        help="only include these message types (comma-separated)",
+    )
+    kind_group.add_argument(
+        "--exclude",
+        default=None,
+        metavar="TYPE[,TYPE,...]",
+        help="exclude these message types (comma-separated)",
+    )
+    dump.add_argument(
+        "--compact",
+        action="store_true",
+        help="single-line JSON (default: pretty-printed)",
+    )
+
     return parser
 
 
 def _cmd_convert(args: argparse.Namespace) -> int:
     src = args.src.expanduser()
-    dst = args.dst.expanduser() if args.dst else None
+    dst = args.output.expanduser() if args.output else None
 
     if not src.exists():
         print(f"error: {src} does not exist", file=sys.stderr)
@@ -112,6 +151,44 @@ def _cmd_convert(args: argparse.Namespace) -> int:
     return 1 if result.failed else 0
 
 
+def _cmd_dump(args: argparse.Namespace) -> int:
+    from pyroparse._messages import all_messages
+
+    src = args.src.expanduser()
+
+    if not src.is_file():
+        print(f"error: {src} does not exist or is not a file", file=sys.stderr)
+        return 1
+
+    try:
+        msgs = all_messages(src)
+    except Exception as exc:
+        print(f"error: {src}: {exc}", file=sys.stderr)
+        return 1
+
+    # Apply --kind / --exclude filters.
+    if args.kind is not None:
+        kinds = {k.strip() for k in args.kind.split(",")}
+        msgs = [m for m in msgs if m["kind"] in kinds]
+    elif args.exclude is not None:
+        exclude = {k.strip() for k in args.exclude.split(",")}
+        msgs = [m for m in msgs if m["kind"] not in exclude]
+
+    indent = None if args.compact else 2
+
+    if args.output is not None:
+        dst = args.output.expanduser()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        with open(dst, "w") as f:
+            json.dump(msgs, f, indent=indent, default=str)
+            f.write("\n")
+    else:
+        json.dump(msgs, sys.stdout, indent=indent, default=str)
+        sys.stdout.write("\n")
+
+    return 0
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -122,6 +199,8 @@ def main() -> None:
 
     if args.command == "convert":
         sys.exit(_cmd_convert(args))
+    elif args.command == "dump":
+        sys.exit(_cmd_dump(args))
 
 
 if __name__ == "__main__":

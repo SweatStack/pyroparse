@@ -8,6 +8,7 @@ from pyroparse._activity import Activity
 from pyroparse._batch import load_fit_batch, scan_fit, scan_parquet
 from pyroparse._convert import ConvertResult, convert_fit_file, convert_fit_tree
 from pyroparse._errors import MultipleActivitiesError
+from pyroparse._messages import all_messages
 from pyroparse._metadata import ActivityMetadata, Device
 from pyroparse._schema import STANDARD_COLUMNS
 from pyroparse._session import Session
@@ -24,6 +25,7 @@ __all__ = [
     "Source",
     "Sport",
     "STANDARD_COLUMNS",
+    "all_messages",
     "classify_sport",
     "convert_fit_file",
     "convert_fit_tree",

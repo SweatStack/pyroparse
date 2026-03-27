@@ -187,7 +187,7 @@ class TestCLI:
         from pyroparse.__main__ import main
 
         out = tmp_path / "out.parquet"
-        with patch("sys.argv", ["pyroparse", "convert", str(fit_path), str(out)]):
+        with patch("sys.argv", ["pyroparse", "convert", str(fit_path), "-o", str(out)]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 0
@@ -198,7 +198,7 @@ class TestCLI:
 
         src = _make_tree(tmp_path, fit_path)
         dst = tmp_path / "dst"
-        with patch("sys.argv", ["pyroparse", "convert", str(src), str(dst), "--no-progress"]):
+        with patch("sys.argv", ["pyroparse", "convert", str(src), "-o", str(dst), "--no-progress"]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 0

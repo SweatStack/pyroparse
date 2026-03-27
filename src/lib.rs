@@ -1783,11 +1783,33 @@ fn parse_fit_metadata(py: Python<'_>, path: &str) -> PyResult<PyObject> {
     build_scan_result_dict(py, &result)
 }
 
+/// Dump all FIT messages as Python dicts — faithfully mirrors fitparser's
+/// FitDataRecord / FitDataField structures with no pyroparse opinions applied.
+#[pyfunction]
+fn dump_fit_messages(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+    let data = std::fs::read(path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    let messages = read_fit_messages(&mut std::io::Cursor::new(data))?;
+    pythonize::pythonize(py, &messages)
+        .map(|bound| bound.unbind())
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
+#[pyfunction]
+fn dump_fit_messages_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
+    let messages = read_fit_messages(&mut std::io::Cursor::new(data))?;
+    pythonize::pythonize(py, &messages)
+        .map(|bound| bound.unbind())
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_fit, m)?)?;
     m.add_function(wrap_pyfunction!(parse_fit_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(parse_fit_metadata, m)?)?;
+    m.add_function(wrap_pyfunction!(dump_fit_messages, m)?)?;
+    m.add_function(wrap_pyfunction!(dump_fit_messages_bytes, m)?)?;
     Ok(())
 }
 
