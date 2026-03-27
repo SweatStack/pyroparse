@@ -16,6 +16,12 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
+## [0.2.0] - 2026-03-27
+
+### Changed
+- Removed fitparse in favor of a completely custom parser that is faster and easier to maintain. Fitparse is still used for dumping a fit file to JSON.
+
+
 ## [0.1.0] - 2026-03-27
 
 First public release.
