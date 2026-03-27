@@ -1,6 +1,6 @@
 unexport CONDA_PREFIX
 
-.PHONY: test build benchmark benchmark_http server build_server
+.PHONY: test build benchmark benchmark_http server build_server publish publish-test
 
 test:
 	uv run python -m pytest tests/ -v $(pytestargs)
@@ -25,3 +25,8 @@ server:
 
 build_server:
 	docker build -t pyroparse . && docker run -p 8000:8000 pyroparse
+
+publish:
+	rm -rf dist/
+	uv build
+	uv publish
