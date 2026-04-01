@@ -6,9 +6,7 @@ import io
 import zipfile
 from pathlib import Path
 
-import pyarrow as pa
 import pyarrow.csv as pcsv
-import pyarrow.parquet as pq
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
@@ -16,7 +14,6 @@ from starlette.routing import Route
 
 from pyroparse import Activity, Session
 from pyroparse._errors import MultipleActivitiesError
-from pyroparse._schema import select_columns
 
 _HTML = (Path(__file__).parent / "index.html").read_text()
 
@@ -29,12 +26,12 @@ def _parse_columns(raw: str | None) -> list[str] | str | None:
     return [c.strip() for c in raw.split(",") if c.strip()]
 
 
-def _write_table(table: pa.Table, fmt: str) -> bytes:
+def _serialize_activity(activity: Activity, fmt: str) -> bytes:
     buf = io.BytesIO()
     if fmt == "csv":
-        pcsv.write_csv(table, buf)
+        pcsv.write_csv(activity.data, buf)
     else:
-        pq.write_table(table, buf, compression="zstd")
+        activity.to_parquet(buf)
     return buf.getvalue()
 
 
@@ -74,11 +71,11 @@ async def convert(request: Request) -> Response:
 
     # Single file response (no allow_multi flag).
     if not allow_multi:
-        table = select_columns(activities[0].data, columns)
+        act = activities[0]
         filename = _activity_filename(stem, 0, ext, multi=False)
         content_type = "text/csv" if fmt == "csv" else "application/octet-stream"
         return Response(
-            content=_write_table(table, fmt),
+            content=_serialize_activity(act, fmt),
             media_type=content_type,
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
@@ -87,10 +84,9 @@ async def convert(request: Request) -> Response:
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for i, act in enumerate(activities):
-            table = select_columns(act.data, columns)
             zf.writestr(
                 _activity_filename(stem, i, ext, multi=True),
-                _write_table(table, fmt),
+                _serialize_activity(act, fmt),
             )
 
     return Response(
