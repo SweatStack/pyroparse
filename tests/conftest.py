@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from pyroparse import Activity, Session
+from pyroparse import Activity, Course, Session
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -21,6 +21,13 @@ def fit_path():
 @pytest.fixture
 def dev_fields_path():
     path = FIXTURES / "with-developer-fields.fit"
+    assert path.exists(), f"Test fixture not found: {path}"
+    return path
+
+
+@pytest.fixture
+def course_path():
+    path = FIXTURES / "course.fit"
     assert path.exists(), f"Test fixture not found: {path}"
     return path
 
@@ -58,6 +65,12 @@ def running_activity():
 def running_activity_all():
     """with-developer-fields.fit with columns='all'."""
     return Activity.load_fit(FIXTURES / "with-developer-fields.fit", columns="all")
+
+
+@pytest.fixture(scope="session")
+def course():
+    """course.fit — parsed once, reused everywhere."""
+    return Course.load_fit(FIXTURES / "course.fit")
 
 
 @pytest.fixture(scope="session")

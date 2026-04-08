@@ -8,7 +8,7 @@ import pyarrow as pa
 from pyroparse._core import parse_fit as _parse_fit
 from pyroparse._core import parse_fit_bytes as _parse_fit_bytes
 from pyroparse._core import parse_fit_metadata as _parse_fit_metadata
-from pyroparse._errors import MultipleActivitiesError
+from pyroparse._errors import FileTypeMismatchError, MultipleActivitiesError
 from pyroparse._metadata import ActivityMetadata, _build_metadata, _merge_metadata
 from pyroparse._schema import select_columns
 from pyroparse._types import PathSource, Source
@@ -105,6 +105,9 @@ class Activity:
         # None = decode everything, list = decode only these columns.
         rust_columns = _build_rust_column_hint(columns, extra_columns)
         raw = _call_parser(source, rust_columns)
+        file_type = raw.get("file_type")
+        if file_type is not None and file_type != "activity":
+            raise FileTypeMismatchError("activity", file_type)
         activities = raw["activities"]
         if len(activities) > 1:
             raise MultipleActivitiesError(len(activities))
@@ -173,6 +176,9 @@ class Activity:
         """
         resolved = str(os.fspath(path))
         raw = _parse_fit_metadata(resolved)
+        file_type = raw.get("file_type")
+        if file_type is not None and file_type != "activity":
+            raise FileTypeMismatchError("activity", file_type)
         activities = raw["activities"]
         if len(activities) > 1:
             raise MultipleActivitiesError(len(activities))
@@ -230,9 +236,17 @@ class Activity:
 # Internal helpers used by both Activity and Session
 # ---------------------------------------------------------------------------
 
+def _check_file_type(raw: dict) -> None:
+    """Raise FileTypeMismatchError if the file is not an activity."""
+    file_type = raw.get("file_type")
+    if file_type is not None and file_type != "activity":
+        raise FileTypeMismatchError("activity", file_type)
+
+
 def _parse_single(source: Source) -> tuple[pa.Table, ActivityMetadata]:
     """Parse a single-activity FIT source, returning (data, metadata)."""
     raw = _call_parser(source)
+    _check_file_type(raw)
     activities = raw["activities"]
     if len(activities) > 1:
         raise MultipleActivitiesError(len(activities))
@@ -244,6 +258,7 @@ def _parse_single(source: Source) -> tuple[pa.Table, ActivityMetadata]:
 def _parse_multi(source: Source) -> list[tuple[pa.Table, ActivityMetadata]]:
     """Parse a multi-activity FIT source, returning list of (data, metadata)."""
     raw = _call_parser(source)
+    _check_file_type(raw)
     return [
         (pa.Table.from_batches([a["records"]]), _build_metadata(a["metadata"]))
         for a in raw["activities"]

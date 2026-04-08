@@ -292,6 +292,7 @@ pub(crate) struct LapBoundary {
 }
 
 pub(crate) struct ParseResult {
+    pub(crate) file_type: Option<String>,
     pub(crate) records: Vec<RecordRow>,
     pub(crate) extra_col_info: Vec<(String, DataType)>,
     pub(crate) extra_data: Vec<TypedColumn>,
@@ -301,6 +302,31 @@ pub(crate) struct ParseResult {
     pub(crate) devices: Vec<DeviceMeta>,
     pub(crate) developer_sensors: Vec<DeveloperSensor>,
     pub(crate) laps: Vec<LapBoundary>,
+}
+
+// ---------------------------------------------------------------------------
+// Course data structures
+// ---------------------------------------------------------------------------
+
+pub(crate) struct CoursePoint {
+    pub(crate) latitude: Option<f64>,
+    pub(crate) longitude: Option<f64>,
+    pub(crate) distance: Option<f64>,
+    pub(crate) name: Option<String>,
+    pub(crate) point_type: Option<String>,
+}
+
+pub(crate) struct CourseMeta {
+    pub(crate) name: Option<String>,
+    pub(crate) total_distance: Option<f64>,
+    pub(crate) total_ascent: Option<u16>,
+    pub(crate) total_descent: Option<u16>,
+}
+
+pub(crate) struct CourseResult {
+    pub(crate) records: Vec<RecordRow>,
+    pub(crate) course_points: Vec<CoursePoint>,
+    pub(crate) meta: CourseMeta,
 }
 
 fn read_fit_messages(reader: &mut impl Read) -> PyResult<Vec<fitparser::FitDataRecord>> {
@@ -314,6 +340,7 @@ fn read_fit_messages(reader: &mut impl Read) -> PyResult<Vec<fitparser::FitDataR
 
 #[derive(Default)]
 pub(crate) struct ScanResult {
+    pub(crate) file_type: Option<String>,
     pub(crate) sessions: Vec<SessionMeta>,
     pub(crate) devices: Vec<DeviceMeta>,
     pub(crate) local_timestamp: Option<f64>,
@@ -854,6 +881,7 @@ fn split_devices_per_session(
 
 fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<PyObject> {
     let result = PyDict::new_bound(py);
+    result.set_item("file_type", parsed.file_type.as_deref())?;
     let activities = PyList::empty_bound(py);
 
     if parsed.sessions.len() <= 1 {
@@ -981,6 +1009,7 @@ fn merge_fixed_with_extras(
 
 fn build_scan_result_dict(py: Python<'_>, scan: &ScanResult) -> PyResult<PyObject> {
     let result = PyDict::new_bound(py);
+    result.set_item("file_type", scan.file_type.as_deref())?;
     let activities = PyList::empty_bound(py);
 
     let build_one = |session: &SessionMeta| -> PyResult<Bound<'_, PyDict>> {
@@ -1078,11 +1107,85 @@ fn dump_fit_messages_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// Course: Arrow batch construction + Python dict
+// ---------------------------------------------------------------------------
+
+fn build_course_track_batch(records: &[RecordRow]) -> PyResult<RecordBatch> {
+    let fields = vec![
+        Field::new("latitude", DataType::Float64, true),
+        Field::new("longitude", DataType::Float64, true),
+        Field::new("altitude", DataType::Float32, true),
+        Field::new("distance", DataType::Float64, true),
+    ];
+    let schema = Schema::new(fields);
+    let arrays: Vec<Arc<dyn arrow::array::Array>> = vec![
+        Arc::new(Float64Array::from_iter(records.iter().map(|r| r.latitude))),
+        Arc::new(Float64Array::from_iter(records.iter().map(|r| r.longitude))),
+        Arc::new(Float32Array::from_iter(records.iter().map(|r| r.altitude))),
+        Arc::new(Float64Array::from_iter(records.iter().map(|r| r.distance))),
+    ];
+    RecordBatch::try_new(Arc::new(schema), arrays)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
+fn build_course_result_dict(py: Python<'_>, parsed: CourseResult) -> PyResult<PyObject> {
+    let result = PyDict::new_bound(py);
+
+    let track = build_course_track_batch(&parsed.records)?;
+    result.set_item(
+        "track",
+        pyo3_arrow::PyRecordBatch::new(track).to_pyarrow(py)?,
+    )?;
+
+    // Waypoints as a list of dicts (small data — not worth an Arrow batch).
+    let waypoints = PyList::empty_bound(py);
+    for pt in &parsed.course_points {
+        let d = PyDict::new_bound(py);
+        d.set_item("name", pt.name.as_deref())?;
+        d.set_item("type", pt.point_type.as_deref())?;
+        d.set_item("latitude", pt.latitude)?;
+        d.set_item("longitude", pt.longitude)?;
+        d.set_item("distance", pt.distance)?;
+        waypoints.append(d)?;
+    }
+
+    let meta = PyDict::new_bound(py);
+    meta.set_item("name", parsed.meta.name.as_deref())?;
+    meta.set_item("total_distance", parsed.meta.total_distance)?;
+    meta.set_item("total_ascent", parsed.meta.total_ascent)?;
+    meta.set_item("total_descent", parsed.meta.total_descent)?;
+    meta.set_item("waypoints", waypoints)?;
+    result.set_item("metadata", meta)?;
+
+    Ok(result.into_any().unbind())
+}
+
+fn do_parse_course(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
+    let parsed = fit::decode::parse_course(data)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    build_course_result_dict(py, parsed)
+}
+
+#[pyfunction]
+fn parse_course(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+    let data = std::fs::read(path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    do_parse_course(py, &data)
+}
+
+#[pyfunction]
+fn parse_course_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
+    do_parse_course(py, data)
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_fit, m)?)?;
     m.add_function(wrap_pyfunction!(parse_fit_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(parse_fit_metadata, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_course, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_course_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(dump_fit_messages, m)?)?;
     m.add_function(wrap_pyfunction!(dump_fit_messages_bytes, m)?)?;
     Ok(())

@@ -7,9 +7,10 @@ import pyarrow as pa
 from pyroparse._activity import Activity
 from pyroparse._batch import load_fit_batch, scan_fit, scan_parquet
 from pyroparse._convert import ConvertResult, convert_fit_file, convert_fit_tree
-from pyroparse._errors import MultipleActivitiesError
+from pyroparse._course import Course
+from pyroparse._errors import FileTypeMismatchError, MultipleActivitiesError
 from pyroparse._messages import all_messages
-from pyroparse._metadata import ActivityMetadata, Device
+from pyroparse._metadata import ActivityMetadata, CourseMetadata, Device, Waypoint
 from pyroparse._schema import STANDARD_COLUMNS
 from pyroparse._session import Session
 from pyroparse._sport import Sport, classify_sport
@@ -19,11 +20,15 @@ __all__ = [
     "Activity",
     "ActivityMetadata",
     "ConvertResult",
+    "Course",
+    "CourseMetadata",
     "Device",
+    "FileTypeMismatchError",
     "MultipleActivitiesError",
     "Session",
     "Source",
     "Sport",
+    "Waypoint",
     "STANDARD_COLUMNS",
     "all_messages",
     "classify_sport",

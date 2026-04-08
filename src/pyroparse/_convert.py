@@ -11,7 +11,8 @@ from typing import Callable
 from tqdm import tqdm
 
 from pyroparse._activity import Activity
-from pyroparse._errors import MultipleActivitiesError
+from pyroparse._course import Course
+from pyroparse._errors import FileTypeMismatchError, MultipleActivitiesError
 from pyroparse._session import Session
 
 # Case-insensitive glob that catches both .fit and .FIT (common on Garmin devices).
@@ -45,6 +46,12 @@ def convert_fit_file(
     src, dst = Path(src), Path(dst)
     try:
         activity = Activity.load_fit(src)
+    except FileTypeMismatchError as exc:
+        if exc.actual == "course":
+            course = Course.load_fit(src)
+            course.to_parquet(dst)
+            return dst
+        raise
     except MultipleActivitiesError:
         session = Session.load_fit(src)
         paths = []

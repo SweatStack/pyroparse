@@ -297,6 +297,28 @@ session.activities[2].metadata.sport  # "running"
 
 ---
 
+## Course files
+
+Course FIT files (planned routes from Garmin Connect, Strava, race organizers) are a different file type from activities. Parse them with `Course`:
+
+```python
+course = pp.Course.load_fit("stage3.fit")
+
+course.track                          # PyArrow Table: latitude, longitude, altitude, distance
+course.metadata.name                  # "Volta Ciclista a Catalunya 2026 - Stage 3"
+course.metadata.distance              # 162110.4 (meters)
+course.metadata.ascent                # 2358.0 (meters)
+course.metadata.waypoints             # list[Waypoint] — turns, climbs, sprints, etc.
+course.metadata.waypoints[0].name     # "km 0"
+course.metadata.waypoints[0].type     # "generic"
+
+course.to_parquet("stage3.parquet")   # single file, waypoints in schema metadata
+```
+
+Passing a course file to `Activity.load_fit()` raises `FileTypeMismatchError` with guidance to use `Course` instead.
+
+---
+
 ## Raw FIT messages
 
 `all_messages()` is the escape hatch — every message in the FIT file, no pyroparse opinions applied. Field names, values, and units come straight from the FIT profile as decoded by `fitparser`. Use it for HR zones, workout steps, events, or anything the opinionated interface doesn't cover.

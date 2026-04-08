@@ -1,12 +1,12 @@
 ---
 name: pyroparse
 description: >
-  Parse FIT activity files into typed PyArrow tables with structured metadata.
-  Covers read_fit, Activity/Session classes, all_messages(), batch operations,
-  Parquet round-trips, column selection, and the pyroparse CLI. Use when
-  writing Python code that reads FIT files, processes activity/workout data,
-  or builds fitness data pipelines — even if the user just says "parse FIT"
-  or "activity data" without naming the library.
+  Parse FIT files (activities, courses) into typed PyArrow tables with structured
+  metadata. Covers read_fit, Activity/Session/Course classes, all_messages(),
+  batch operations, Parquet round-trips, column selection, and the pyroparse CLI.
+  Use when writing Python code that reads FIT files, processes activity/workout/
+  route data, or builds fitness data pipelines — even if the user just says
+  "parse FIT" or "activity data" without naming the library.
 ---
 
 # Pyroparse
@@ -71,6 +71,18 @@ session.activities[0].metadata.sport               # "swimming"
 session.activities[1].metadata.sport               # "cycling"
 ```
 
+### Course files (planned routes)
+
+```python
+course = pp.Course.load_fit("stage3.fit")
+course.track                                       # -> pa.Table (lat, lon, alt, distance)
+course.metadata.name                               # "Volta Ciclista Stage 3"
+course.metadata.waypoints                          # -> list[Waypoint] (turns, climbs, sprints)
+course.metadata.waypoints[0].name                  # "km 0"
+course.metadata.waypoints[0].type                  # "generic"
+course.to_parquet("stage3.parquet")                # single file, waypoints in metadata
+```
+
 ### Raw FIT messages (escape hatch)
 
 ```python
@@ -117,6 +129,8 @@ pyroparse dump ride.fit --kind event,hr_zone       # filter by message type
 | `pp.Activity.load_csv(source, ...)` | CSV -> `Activity` |
 | `pp.Activity.open_fit(path, ...)` | Lazy: metadata now, data on `.data` access |
 | `pp.Activity.open_parquet(path, ...)` | Lazy Parquet loader |
+| `pp.Course.load_fit(source)` | Course FIT -> `Course` (track + waypoints) |
+| `pp.Course.load_parquet(path)` | Parquet -> `Course` |
 | `pp.Session.load_fit(source, ...)` | Multi-activity FIT -> `Session` |
 | `pp.Session.open_fit(path, ...)` | Lazy multi-activity loader |
 | `pp.scan_fit(path, ...)` | Directory -> catalog `pa.Table` (metadata only) |
@@ -141,6 +155,8 @@ pyroparse dump ride.fit --kind event,hr_zone       # filter by message type
 
 ## Gotchas
 
+- `Activity.load_fit()` raises `FileTypeMismatchError` for non-activity FIT
+  files (e.g. course files). Use `Course.load_fit()` for course/route files.
 - `Activity.load_fit()` raises `MultipleActivitiesError` for multi-session
   FIT files (triathlon, multisport). Use `Session.load_fit()` instead.
 - `read_fit()` returns a bare `pa.Table` with no metadata access. Use

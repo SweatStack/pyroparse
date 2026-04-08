@@ -116,6 +116,8 @@ pub const MESG_LAP: u16 = 19;
 pub const MESG_RECORD: u16 = 20;
 pub const MESG_EVENT: u16 = 21;
 pub const MESG_DEVICE_INFO: u16 = 23;
+pub const MESG_COURSE: u16 = 31;
+pub const MESG_COURSE_POINT: u16 = 32;
 pub const MESG_DEVELOPER_DATA_ID: u16 = 207;
 pub const MESG_FIELD_DESCRIPTION: u16 = 206;
 
@@ -6251,6 +6253,53 @@ pub fn fit_base_type_name(val: u8) -> &'static str {
         142 => "sint64",
         143 => "uint64",
         144 => "uint64z",
+        _ => "unknown",
+    }
+}
+
+/// Map course_point type numeric value to its string name.
+pub fn course_point_type_name(val: u8) -> &'static str {
+    match val {
+        0 => "generic",
+        1 => "summit",
+        2 => "valley",
+        3 => "water",
+        4 => "food",
+        5 => "danger",
+        6 => "left",
+        7 => "right",
+        8 => "straight",
+        9 => "first_aid",
+        10 => "fourth_category",
+        11 => "third_category",
+        12 => "second_category",
+        13 => "first_category",
+        14 => "hors_category",
+        15 => "sprint",
+        16 => "left_fork",
+        17 => "right_fork",
+        18 => "middle_fork",
+        19 => "slight_left",
+        20 => "sharp_left",
+        21 => "slight_right",
+        22 => "sharp_right",
+        23 => "u_turn",
+        24 => "segment_start",
+        25 => "segment_end",
+        26 => "campsite",
+        27 => "aid_station",
+        28 => "rest_stop",
+        29 => "general_distance",
+        30 => "service",
+        31 => "energy_gel",
+        32 => "sports_drink",
+        33 => "mile_marker",
+        34 => "checkpoint",
+        35 => "shelter",
+        36 => "meeting_point",
+        37 => "overlook",
+        38 => "toilet",
+        39 => "shower",
         _ => "unknown",
     }
 }

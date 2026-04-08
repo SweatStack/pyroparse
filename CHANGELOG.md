@@ -16,6 +16,16 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
+## [Unreleased]
+
+### Added
+- **Course file support** — New `Course` class for parsing course/route FIT files. `Course.load_fit()` returns `.track` (dense GPS trace as a PyArrow table: latitude, longitude, altitude, distance) and `.metadata` with course name, distance, ascent, descent, and a list of `Waypoint` objects (named/typed annotations along the route).
+- **Waypoint dataclass** — `Waypoint(name, type, latitude, longitude, distance)` for course point annotations. Available via `course.metadata.waypoints`.
+- **File type detection** — `Activity.load_fit()` and `Session.load_fit()` now raise `FileTypeMismatchError` when given a non-activity FIT file (e.g. course), with a message guiding to the correct class. `Course.load_fit()` similarly rejects activity files.
+- **Course parquet round-trip** — `Course.to_parquet()` writes a single Parquet file with waypoints embedded in the schema metadata. `Course.load_parquet()` reads it back.
+- **Course conversion** — `pyroparse convert` and `convert_fit_file()` automatically detect and handle course files.
+
+
 ## [0.2.0] - 2026-03-27
 
 ### Changed

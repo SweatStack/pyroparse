@@ -88,6 +88,56 @@ class ActivityMetadata:
         return self._repr("ActivityMetadata")
 
 
+@dataclass
+class Waypoint:
+    """A named point along a course route."""
+    name: str | None = None
+    type: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    distance: float | None = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def __repr__(self) -> str:
+        label = self.name or "unnamed"
+        tag = self.type or "unknown"
+        if self.distance is not None:
+            return f"Waypoint({label!r}, {tag}, {self.distance / 1000:.1f}km)"
+        return f"Waypoint({label!r}, {tag})"
+
+
+@dataclass
+class CourseMetadata:
+    name: str | None = None
+    distance: float | None = None
+    ascent: float | None = None
+    descent: float | None = None
+    waypoints: list[Waypoint] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "distance": self.distance,
+            "ascent": self.ascent,
+            "descent": self.descent,
+            "waypoints": [w.to_dict() for w in self.waypoints],
+        }
+
+    def __repr__(self) -> str:
+        parts: list[str] = []
+        if self.name:
+            parts.append(f'"{self.name}"')
+        if self.distance is not None and self.distance > 0:
+            parts.append(f"{self.distance / 1000:.1f}km")
+        if self.ascent is not None:
+            parts.append(f"{self.ascent:.0f}m ascent")
+        if self.waypoints:
+            parts.append(f"{len(self.waypoints)} waypoints")
+        return f"CourseMetadata({', '.join(parts)})"
+
+
 def _merge_metadata(
     base: ActivityMetadata, overrides: dict | None
 ) -> ActivityMetadata:

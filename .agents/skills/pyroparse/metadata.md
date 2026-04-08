@@ -62,6 +62,38 @@ developer fields, it detects CIQ apps by UUID (Stryd, CORE, etc.).
 After column selection, `device.columns` is filtered to only include columns
 present in the final table.
 
+## CourseMetadata
+
+Dataclass for course/route files. Waypoints are embedded in metadata (not a
+separate table) since they're small, sparse annotations.
+
+```python
+@dataclass
+class CourseMetadata:
+    name: str | None              # Course name
+    distance: float | None        # Total distance in meters
+    ascent: float | None          # Total ascent in meters
+    descent: float | None         # Total descent in meters
+    waypoints: list[Waypoint]     # Turns, climbs, sprints, etc.
+```
+
+## Waypoint
+
+```python
+@dataclass
+class Waypoint:
+    name: str | None              # "km 0", "Sprint 1", "Road works"
+    type: str | None              # "generic", "sharp_left", "first_category", etc.
+    latitude: float | None        # Degrees
+    longitude: float | None       # Degrees
+    distance: float | None        # Meters along route
+```
+
+Types include: `generic`, `summit`, `valley`, `water`, `food`, `danger`,
+`left`, `right`, `sharp_left`, `sharp_right`, `slight_left`, `slight_right`,
+`sprint`, `first_category`, `second_category`, `third_category`,
+`fourth_category`, `hors_category`, and more.
+
 ## Sport enum
 
 Hierarchical enum with dot-notation values.

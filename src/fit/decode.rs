@@ -20,6 +20,7 @@ use crate::types::{TypedColumn, promote_type, base_type_to_arrow};
 use crate::{
     SessionMeta, DeviceMeta, ScanResult, ParseResult,
     RecordRow, LapBoundary, SEMICIRCLE_TO_DEGREES,
+    CourseResult, CoursePoint, CourseMeta,
     classify_developer_sensors, bytes_to_uuid,
     column_for_developer_field,
 };
@@ -124,6 +125,18 @@ impl<'a> Iterator for FieldIter<'a> {
 /// This is the replacement for the hand-written `FitScanner`. It uses the
 /// binary reader and generated profile to decode Session, DeviceInfo,
 /// Activity, DeveloperDataId, and FieldDescription messages.
+/// Decode file_id type field (field 0, enum) → file type string.
+fn decode_file_type(def: &MessageDef, field_bytes: &[u8]) -> Option<String> {
+    for (num, data) in FieldIter::new(def, field_bytes) {
+        if num == 0 {
+            if let Some(v) = read_u8_valid(data) {
+                return Some(profile::file_name(v).to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn scan_metadata(data: &[u8]) -> Result<ScanResult, String> {
     let mut reader = FitReader::new(data)
         .map_err(|e| e.to_string())?;
@@ -151,6 +164,11 @@ pub fn scan_metadata(data: &[u8]) -> Result<ScanResult, String> {
                 let global = def.global_message_number;
 
                 match global {
+                    profile::MESG_FILE_ID => {
+                        if result.file_type.is_none() {
+                            result.file_type = decode_file_type(def, field_bytes);
+                        }
+                    }
                     profile::MESG_RECORD => {
                         // Skip — we only need metadata.
                     }
@@ -495,6 +513,7 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
     // ── Pass 1: metadata + extra column discovery ────────────────────────
     let mut reader = FitReader::new(data).map_err(|e| e.to_string())?;
 
+    let mut file_type: Option<String> = None;
     let mut sessions = Vec::new();
     let mut devices = Vec::new();
     let mut laps = Vec::new();
@@ -586,6 +605,11 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                 let global = def.global_message_number;
 
                 match global {
+                    profile::MESG_FILE_ID => {
+                        if file_type.is_none() {
+                            file_type = decode_file_type(def, field_bytes);
+                        }
+                    }
                     profile::MESG_RECORD => { n_rows += 1; }
                     profile::MESG_SESSION => {
                         sessions.push(decode_session(def, field_bytes));
@@ -853,6 +877,7 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
     laps.sort_by_key(|l| l.start_time_us);
 
     Ok(ParseResult {
+        file_type,
         records,
         extra_col_info,
         extra_data,
@@ -861,6 +886,226 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
         developer_sensors,
         laps,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Course parser
+// ---------------------------------------------------------------------------
+
+/// Parse a course FIT file, extracting the GPS trace and course point annotations.
+///
+/// Single-pass: decodes Record messages (lat/lon/altitude/distance), CoursePoint
+/// messages, Course metadata, and Lap totals.
+pub fn parse_course(data: &[u8]) -> Result<CourseResult, String> {
+    let mut reader = FitReader::new(data).map_err(|e| e.to_string())?;
+
+    let mut file_type: Option<String> = None;
+    let mut records = Vec::new();
+    let mut course_points = Vec::new();
+    let mut meta = CourseMeta {
+        name: None,
+        total_distance: None,
+        total_ascent: None,
+        total_descent: None,
+    };
+
+    let mut base_timestamp: Option<u32> = None;
+
+    while let Some(event) = reader.next().map_err(|e| e.to_string())? {
+        let time_offset = match &event {
+            FitEvent::CompressedData { time_offset, .. } => Some(*time_offset),
+            _ => None,
+        };
+
+        let (local, field_bytes) = match &event {
+            FitEvent::Data { local, field_bytes, .. } => (*local, *field_bytes),
+            FitEvent::CompressedData { local, field_bytes, .. } => (*local, *field_bytes),
+            _ => continue,
+        };
+
+        let def = match reader.def(local) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        match def.global_message_number {
+            profile::MESG_FILE_ID => {
+                if file_type.is_none() {
+                    file_type = decode_file_type(def, field_bytes);
+                }
+            }
+
+            profile::MESG_RECORD => {
+                let be = def.big_endian;
+
+                // Resolve timestamp (needed to advance compressed timestamp state).
+                let timestamp = if let Some(offset) = time_offset {
+                    resolve_compressed_timestamp(&mut base_timestamp, offset)
+                } else {
+                    let mut ts = None;
+                    for (num, fdata) in FieldIter::new(def, field_bytes) {
+                        if num == 253 {
+                            ts = read_u32(fdata, be);
+                            break;
+                        }
+                    }
+                    if let Some(t) = ts { base_timestamp = Some(t); }
+                    ts
+                };
+                let _ = timestamp; // not stored — course timestamps are synthetic
+
+                let mut row = RecordRow::default();
+                for (num, fdata) in FieldIter::new(def, field_bytes) {
+                    match num {
+                        0 => {
+                            if let Some(v) = read_i32(fdata, be) {
+                                row.latitude = Some(v as f64 * SEMICIRCLE_TO_DEGREES);
+                            }
+                        }
+                        1 => {
+                            if let Some(v) = read_i32(fdata, be) {
+                                row.longitude = Some(v as f64 * SEMICIRCLE_TO_DEGREES);
+                            }
+                        }
+                        2 => {
+                            if let Some(v) = read_u16(fdata, be) {
+                                row.altitude = Some(v as f32 / 5.0 - 500.0);
+                            }
+                        }
+                        5 => {
+                            if let Some(v) = read_u32(fdata, be) {
+                                row.distance = Some(v as f64 / 100.0);
+                            }
+                        }
+                        78 => {
+                            // enhanced_altitude (overrides field 2)
+                            if let Some(v) = read_u32(fdata, be) {
+                                row.altitude = Some(v as f32 / 5.0 - 500.0);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                records.push(row);
+            }
+
+            profile::MESG_COURSE => {
+                let be = def.big_endian;
+                for (num, fdata) in FieldIter::new(def, field_bytes) {
+                    if num == 5 {
+                        // name (string)
+                        meta.name = read_string(fdata);
+                    }
+                    // field 4 = sport, but courses don't always have it
+                    let _ = (num, be);
+                }
+            }
+
+            profile::MESG_COURSE_POINT => {
+                let be = def.big_endian;
+                let mut pt = CoursePoint {
+                    latitude: None,
+                    longitude: None,
+                    distance: None,
+                    name: None,
+                    point_type: None,
+                };
+                for (num, fdata) in FieldIter::new(def, field_bytes) {
+                    match num {
+                        2 => {
+                            // position_lat (sint32, semicircles)
+                            if let Some(v) = read_i32(fdata, be) {
+                                pt.latitude = Some(v as f64 * SEMICIRCLE_TO_DEGREES);
+                            }
+                        }
+                        3 => {
+                            // position_long (sint32, semicircles)
+                            if let Some(v) = read_i32(fdata, be) {
+                                pt.longitude = Some(v as f64 * SEMICIRCLE_TO_DEGREES);
+                            }
+                        }
+                        4 => {
+                            // distance (uint32, scale 100)
+                            if let Some(v) = read_u32(fdata, be) {
+                                pt.distance = Some(v as f64 / 100.0);
+                            }
+                        }
+                        5 => {
+                            // type (enum)
+                            if let Some(v) = read_u8_valid(fdata) {
+                                pt.point_type = Some(
+                                    profile::course_point_type_name(v).to_string()
+                                );
+                            }
+                        }
+                        6 => {
+                            // name (string)
+                            pt.name = read_string(fdata);
+                        }
+                        _ => {}
+                    }
+                }
+                course_points.push(pt);
+            }
+
+            profile::MESG_LAP => {
+                // Extract totals from the (typically single) lap message.
+                let be = def.big_endian;
+                for (num, fdata) in FieldIter::new(def, field_bytes) {
+                    match num {
+                        9 => {
+                            // total_distance (uint32, scale 100)
+                            if let Some(v) = read_u32(fdata, be) {
+                                meta.total_distance = Some(v as f64 / 100.0);
+                            }
+                        }
+                        21 => {
+                            // total_ascent (uint16)
+                            if let Some(v) = read_u16(fdata, be) {
+                                meta.total_ascent = Some(v);
+                            }
+                        }
+                        22 => {
+                            // total_descent (uint16)
+                            if let Some(v) = read_u16(fdata, be) {
+                                meta.total_descent = Some(v);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            _ => {
+                // Track timestamps from other messages for compressed timestamp.
+                for (num, fdata) in FieldIter::new(def, field_bytes) {
+                    if num == 253 {
+                        if let Some(ts) = read_u32(fdata, def.big_endian) {
+                            base_timestamp = Some(ts);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Validate file type.
+    match file_type.as_deref() {
+        Some("course") => {}
+        Some(other) => {
+            let article = if other.starts_with(|c: char| "aeiou".contains(c)) { "an" } else { "a" };
+            return Err(format!(
+                "Expected a course file, got {} {} file. \
+                 Use Activity.load_fit() or Session.load_fit() instead.",
+                article, other,
+            ));
+        }
+        None => {
+            return Err("FIT file has no file_id type field".into());
+        }
+    }
+
+    Ok(CourseResult { records, course_points, meta })
 }
 
 // ---------------------------------------------------------------------------
