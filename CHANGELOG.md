@@ -16,7 +16,7 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
-## [Unreleased]
+## [0.3.0] - 2026-04-20
 
 ### Added
 - **Course file support** — New `Course` class for parsing course/route FIT files. `Course.load_fit()` returns `.track` (dense GPS trace as a PyArrow table: latitude, longitude, altitude, distance) and `.metadata` with course name, distance, ascent, descent, and a list of `Waypoint` objects (named/typed annotations along the route).

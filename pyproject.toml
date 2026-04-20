@@ -1,6 +1,6 @@
 [project]
 name = "pyroparse"
-version = "0.2.0"
+version = "0.3.0"
 description = "Fast and opinionated activity data parsing. Forged in Rust. Fired up in Python."
 readme = "README.md"
 authors = [{ name = "Aart Goossens", email = "aart@sweatstack.no" }]
