@@ -22,8 +22,14 @@ Types of changes:
 - **Course file support** — New `Course` class for parsing course/route FIT files. `Course.load_fit()` returns `.track` (dense GPS trace as a PyArrow table: latitude, longitude, altitude, distance) and `.metadata` with course name, distance, ascent, descent, and a list of `Waypoint` objects (named/typed annotations along the route).
 - **Waypoint dataclass** — `Waypoint(name, type, latitude, longitude, distance)` for course point annotations. Available via `course.metadata.waypoints`.
 - **File type detection** — `Activity.load_fit()` and `Session.load_fit()` now raise `FileTypeMismatchError` when given a non-activity FIT file (e.g. course), with a message guiding to the correct class. `Course.load_fit()` similarly rejects activity files.
-- **Course parquet round-trip** — `Course.to_parquet()` writes a single Parquet file with waypoints embedded in the schema metadata. `Course.load_parquet()` reads it back.
+- **Course parquet round-trip** — `Course.to_parquet()` writes a single Parquet file with waypoints embedded in the schema metadata. `Course.load_parquet()` reads it back. Also accepts `BinaryIO` for in-memory serialization.
 - **Course conversion** — `pyroparse convert` and `convert_fit_file()` automatically detect and handle course files.
+
+### Changed
+- **Web API: dedicated endpoints per file type** — Replaced `POST /convert` with `POST /activity`, `POST /session`, and `POST /course`. Each endpoint has a predictable output schema and returns 400 with guidance when given the wrong file type. **Breaking:** `POST /convert` and the `allow_multi` parameter are removed.
+
+### Fixed
+- **Web server parquet metadata** — Fixed the server to correctly include activity metadata when writing parquet files.
 
 
 ## [0.2.0] - 2026-03-27

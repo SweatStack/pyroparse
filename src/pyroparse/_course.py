@@ -45,9 +45,9 @@ class Course:
         meta = _build_course_metadata(raw["metadata"])
         return cls(track, meta)
 
-    def to_parquet(self, path: str | os.PathLike[str]) -> None:
+    def to_parquet(self, path: str | os.PathLike[str] | BinaryIO) -> None:
         """Write course to a single Parquet file with metadata (including waypoints) in the schema."""
-        dest = str(os.fspath(path))
+        dest = str(path) if isinstance(path, (str, os.PathLike)) else path
         meta_json = json.dumps(self._metadata.to_dict()).encode()
         existing = self._track.schema.metadata or {}
         combined = {**existing, _METADATA_KEY: meta_json}
