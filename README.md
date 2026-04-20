@@ -388,6 +388,30 @@ cd pyroparse
 maturin develop --release
 ```
 
+### Releasing
+
+Releases are automated via GitHub Actions. On tag push:
+
+1. CI runs the full test suite
+2. Wheels are built for Linux (x86_64, aarch64), macOS (x86_64, arm64), and Windows (x86_64)
+3. All artifacts are published to PyPI via trusted publisher (OIDC)
+
+```bash
+# 1. Bump version in pyproject.toml and Cargo.toml
+# 2. Commit and tag
+git commit -am "Release v0.4.0"
+git tag v0.4.0
+git push && git push --tags
+```
+
+To build wheels locally for testing (requires Docker for Linux targets):
+
+```bash
+make wheels          # all targets
+./build.sh macos     # macOS only
+./build.sh linux     # Linux only (Docker)
+```
+
 ### Docker
 
 A minimal HTTP server for FIT to Parquet/CSV conversion:

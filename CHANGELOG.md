@@ -15,6 +15,11 @@ Types of changes:
 - `Fixed` for any bug fixes.
 - `Security` in case of vulnerabilities.
 
+## [0.3.1] - 2026-04-20
+
+### Added
+- Adds Github CI publishing flow.
+
 
 ## [0.3.0] - 2026-04-20
 
