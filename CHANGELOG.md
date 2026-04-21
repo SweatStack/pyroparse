@@ -16,7 +16,7 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
-## [Unreleased]
+## [0.3.5] - 2026-04-21
 
 ### Fixed
 - Fixed Windows CI tests by installing tzdata before copying timezone data
