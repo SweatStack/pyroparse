@@ -15,6 +15,13 @@ Types of changes:
 - `Fixed` for any bug fixes.
 - `Security` in case of vulnerabilities.
 
+## [Unreleased]
+
+### Fixed
+- CI: Add `x86_64-apple-darwin` Rust target for macOS cross-compilation.
+- CI: Add `tzdata` to cibuildwheel test dependencies (fixes timezone tests on Windows).
+- CI: Fix `musllinux_aarch64` skip pattern so those slow QEMU builds are actually skipped.
+
 ## [0.3.1] - 2026-04-20
 
 ### Added
