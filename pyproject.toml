@@ -41,6 +41,11 @@ environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
 
 [tool.cibuildwheel.windows]
 archs = "AMD64"
+# PyArrow's C++ layer on Windows looks for IANA timezone data at
+# %USERPROFILE%\Downloads\tzdata — which doesn't exist on CI runners.
+# Copy it there from the tzdata Python package (in test-requires).
+# See: https://github.com/apache/arrow/issues/36991
+before-test = "python -c \"import shutil,pathlib,importlib.resources as ir; shutil.copytree(ir.files('tzdata')/'zoneinfo', pathlib.Path.home()/'Downloads'/'tzdata', dirs_exist_ok=True)\""
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
