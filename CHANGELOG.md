@@ -15,6 +15,18 @@ Types of changes:
 - `Fixed` for any bug fixes.
 - `Security` in case of vulnerabilities.
 
+## [Unreleased]
+
+### Changed
+- CI: Replace QEMU emulation with native ARM runners for aarch64 Linux builds.
+- CI: Use pre-installed Rust on macOS runners instead of installing from scratch.
+- CI: Split Linux wheel builds into parallel x86_64 and aarch64 jobs.
+
+### Fixed
+- CI: Fix macOS wheel build by setting `MACOSX_DEPLOYMENT_TARGET=11.0`.
+- CI: Fix Windows wheel tests by copying IANA timezone data for PyArrow's C++ layer.
+- CI: Add sccache to speed up Rust compilation across Python versions.
+
 ## [0.3.2] - 2026-04-21
 
 ### Fixed
