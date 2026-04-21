@@ -16,7 +16,7 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
-## [Unreleased]
+## [0.3.6] - 2026-04-21
 
 ### Fixed
 - CI: Update `pypa/gh-action-pypi-publish` to v1.14.0 for Metadata-Version 2.4 support (fixes publish step rejecting maturin-built wheels).
