@@ -15,7 +15,7 @@ Types of changes:
 - `Fixed` for any bug fixes.
 - `Security` in case of vulnerabilities.
 
-## [Unreleased]
+## [0.3.2] - 2026-04-21
 
 ### Fixed
 - CI: Add `x86_64-apple-darwin` Rust target for macOS cross-compilation.
