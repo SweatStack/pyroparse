@@ -15,7 +15,7 @@ Types of changes:
 - `Fixed` for any bug fixes.
 - `Security` in case of vulnerabilities.
 
-## [Unreleased]
+## [0.3.3] - 2026-04-21
 
 ### Changed
 - CI: Replace QEMU emulation with native ARM runners for aarch64 Linux builds.
