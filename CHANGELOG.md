@@ -15,6 +15,11 @@ Types of changes:
 - `Fixed` for any bug fixes.
 - `Security` in case of vulnerabilities.
 
+## [Unreleased]
+
+### Removed
+- CI: Remove sccache (broke inside cibuildwheel's isolated build environments).
+
 ## [0.3.3] - 2026-04-21
 
 ### Changed
@@ -25,7 +30,6 @@ Types of changes:
 ### Fixed
 - CI: Fix macOS wheel build by setting `MACOSX_DEPLOYMENT_TARGET=11.0`.
 - CI: Fix Windows wheel tests by copying IANA timezone data for PyArrow's C++ layer.
-- CI: Add sccache to speed up Rust compilation across Python versions.
 
 ## [0.3.2] - 2026-04-21
 

@@ -31,20 +31,13 @@ test-requires = ["pytest", "tzdata"]
 test-command = "pytest {project}/tests -x --no-header -q"
 
 [tool.cibuildwheel.linux]
-before-all = """
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
-pip install sccache && \
-sccache --start-server
-"""
-environment = { PATH = "$HOME/.cargo/bin:$PATH", RUSTC_WRAPPER = "sccache" }
+before-all = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+environment = { PATH = "$HOME/.cargo/bin:$PATH" }
 
 [tool.cibuildwheel.macos]
-before-all = "pip install sccache && sccache --start-server"
-environment = { MACOSX_DEPLOYMENT_TARGET = "11.0", RUSTC_WRAPPER = "sccache" }
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
 
 [tool.cibuildwheel.windows]
-before-all = "pip install sccache && sccache --start-server"
-environment = { RUSTC_WRAPPER = "sccache" }
 # PyArrow's C++ layer on Windows looks for IANA timezone data at
 # %USERPROFILE%\Downloads\tzdata — which doesn't exist on CI runners.
 # Copy it there from the tzdata Python package (in test-requires).
