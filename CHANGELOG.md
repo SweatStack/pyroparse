@@ -16,7 +16,7 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
-## [Unreleased]
+## [0.4.0] - 2026-05-29
 
 ### Changed
 - **Sport values now come from [open-sport-taxonomy](https://pypi.org/project/open-sport-taxonomy/).** `ActivityMetadata.sport` is now a canonical taxonomy code (e.g. `cycling`, `cycling.road`, `cycling+stationary`) instead of the previous custom enum. `pp.Sport` is the taxonomy's `Sport` class, re-exported.
