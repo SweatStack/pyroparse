@@ -1,137 +1,134 @@
+"""Tests for FIT sport/sub_sport → OST Sport decoding in metadata.
+
+The sport taxonomy itself is owned and tested by ``open-sport-taxonomy``.
+These tests cover only the pyroparse side: the thin ``_decode_sport``
+wrapper that maps raw FIT enum names to the canonical OST string, the
+``_merge_metadata`` override path that validates caller-supplied sports,
+and the invariant that ``ActivityMetadata.sport`` is always ``None`` or a
+valid OST sport string.
+"""
+
+from __future__ import annotations
+
 import pytest
 
-from pyroparse import Sport, classify_sport
+from pyroparse import Sport
+from pyroparse._metadata import ActivityMetadata, _decode_sport, _merge_metadata
 
 
-class TestSportEnum:
-    def test_cycling_road_value(self):
-        assert Sport.CYCLING_ROAD == "cycling.road"
-
-    def test_str_returns_value(self):
-        assert str(Sport.CYCLING_ROAD) == "cycling.road"
-
-    def test_hierarchy(self):
-        assert Sport.CYCLING_ROAD.value.startswith(Sport.CYCLING.value)
-
-    def test_construct_from_value(self):
-        assert Sport("cycling.road") is Sport.CYCLING_ROAD
-
-    def test_three_level_member(self):
-        assert Sport.CYCLING_TRACK_250M == "cycling.track.250m"
+def _is_valid_sport(value: str) -> bool:
+    """True if *value* is the canonical string form of a real OST sport."""
+    try:
+        return str(Sport(value)) == value
+    except ValueError:
+        return False
 
 
-class TestParentSport:
-    def test_leaf_parent(self):
-        assert Sport.CYCLING_ROAD.parent_sport() is Sport.CYCLING
-
-    def test_mid_level_parent(self):
-        assert Sport.CYCLING_TRACK.parent_sport() is Sport.CYCLING
-
-    def test_deep_parent(self):
-        assert Sport.CYCLING_TRACK_250M.parent_sport() is Sport.CYCLING_TRACK
-
-    def test_root_has_no_parent(self):
-        assert Sport.CYCLING.parent_sport() is None
-
-    def test_unknown_has_no_parent(self):
-        assert Sport.UNKNOWN.parent_sport() is None
+class TestSportReexport:
+    def test_sport_is_ost_class(self):
+        from open_sport_taxonomy import Sport as OstSport
+        assert Sport is OstSport
 
 
-class TestRootSport:
-    def test_leaf_root(self):
-        assert Sport.CYCLING_ROAD.root_sport() is Sport.CYCLING
+class TestDecodeSport:
+    @pytest.mark.parametrize(
+        "sport, sub_sport, expected",
+        [
+            ("cycling", "road",    "cycling.road"),
+            ("cycling", "gravel_cycling", "cycling.gravel"),
+            ("cycling", "generic", "cycling"),
+            ("cycling", None,      "cycling"),
+            ("cycling", "indoor_cycling", "cycling+stationary"),
+            ("running", "trail",   "running.trail"),
+            ("running", "treadmill", "running+stationary"),
+            ("running", "generic", "running"),
+            ("swimming", "open_water", "swimming.open_water"),
+        ],
+    )
+    def test_known_pairs(self, sport, sub_sport, expected):
+        assert _decode_sport(sport, sub_sport) == expected
 
-    def test_deep_root(self):
-        assert Sport.CYCLING_TRACK_250M.root_sport() is Sport.CYCLING
+    def test_no_sport_returns_none(self):
+        assert _decode_sport(None, None) is None
+        assert _decode_sport(None, "road") is None
 
-    def test_root_returns_self(self):
-        assert Sport.CYCLING.root_sport() is Sport.CYCLING
+    def test_unknown_fit_name_falls_back_to_generic(self):
+        assert _decode_sport("paragliding", None) == "generic"
 
-    def test_unknown_root(self):
-        assert Sport.UNKNOWN.root_sport() is Sport.UNKNOWN
+    def test_known_but_unmapped_sub_sport_falls_back_to_generic(self):
+        # ``downhill`` is a recognised FIT sub_sport but has no OST
+        # mapping. OST 0.5.0's data-driven coarsening has no rule that
+        # reduces it to the bare sport, so it falls all the way back to
+        # ``generic`` rather than ``cycling``.
+        assert _decode_sport("cycling", "downhill") == "generic"
 
-
-class TestIsRootSport:
-    def test_root(self):
-        assert Sport.CYCLING.is_root_sport() is True
-
-    def test_not_root(self):
-        assert Sport.CYCLING_ROAD.is_root_sport() is False
-
-    def test_generic_is_root(self):
-        assert Sport.GENERIC.is_root_sport() is True
-
-
-class TestIsSubSportOf:
-    def test_direct_child(self):
-        assert Sport.CYCLING_ROAD.is_sub_sport_of(Sport.CYCLING) is True
-
-    def test_deep_descendant(self):
-        assert Sport.CYCLING_TRACK_250M.is_sub_sport_of(Sport.CYCLING) is True
-
-    def test_not_descendant(self):
-        assert Sport.CYCLING_ROAD.is_sub_sport_of(Sport.RUNNING) is False
-
-    def test_self_is_not_descendant(self):
-        assert Sport.CYCLING.is_sub_sport_of(Sport.CYCLING) is False
-
-    def test_list_input(self):
-        assert Sport.CYCLING_ROAD.is_sub_sport_of([Sport.CYCLING, Sport.RUNNING]) is True
-
-    def test_list_no_match(self):
-        assert Sport.SWIMMING.is_sub_sport_of([Sport.CYCLING, Sport.RUNNING]) is False
-
-    def test_tuple_input(self):
-        assert Sport.RUNNING_TRAIL.is_sub_sport_of((Sport.RUNNING,)) is True
+    def test_genuinely_unknown_fit_value_falls_back_to_generic(self):
+        # Out-of-range FIT enum values are emitted by the Rust layer as the
+        # literal string ``"unknown"`` (see ``profile::sport_name``). OST
+        # rejects that name, and the wrapper shields the caller with
+        # ``generic`` rather than letting the ValueError escape.
+        assert _decode_sport("unknown", None) == "generic"
+        assert _decode_sport("cycling", "unknown") == "generic"
 
 
-class TestDisplayName:
-    def test_root(self):
-        assert Sport.CYCLING.display_name() == "Cycling"
-
-    def test_two_levels(self):
-        assert Sport.CYCLING_ROAD.display_name() == "Cycling \u203a Road"
-
-    def test_three_levels(self):
-        assert Sport.CYCLING_TRACK_250M.display_name() == "Cycling \u203a Track \u203a 250M"
-
-    def test_underscore_in_name(self):
-        assert Sport.CROSS_COUNTRY_SKIING.display_name() == "Cross Country Skiing"
-
-    def test_open_water(self):
-        assert Sport.SWIMMING_OPEN_WATER.display_name() == "Swimming \u203a Open Water"
+# A representative breadth of FIT sport enum names (from the Garmin FIT SDK
+# ``sport`` enum, mirrored in ``src/fit/profile.rs``) plus the ``"unknown"``
+# sentinel the Rust layer emits for out-of-range values. The point is not
+# exhaustiveness but breadth: it guards the wrapper's shielding contract.
+_FIT_SPORT_NAMES = [
+    "generic", "running", "cycling", "transition", "fitness_equipment",
+    "swimming", "walking", "rowing", "hiking", "mountaineering",
+    "cross_country_skiing", "alpine_skiing", "snowboarding", "paddling",
+    "rock_climbing", "sailing", "ice_skating", "inline_skating",
+    "snowshoeing", "stand_up_paddleboarding", "golf", "horseback_riding",
+    "e_biking", "motorcycling", "multisport", "training", "unknown",
+]
 
 
-class TestClassifySport:
-    def test_cycling_road(self):
-        assert classify_sport("cycling", "road") == Sport.CYCLING_ROAD
+class TestDecodeInvariant:
+    """``_decode_sport`` must never raise and never produce an invalid
+    sport — its only outputs are ``None`` or a canonical OST sport string."""
 
-    def test_cycling_indoor(self):
-        assert classify_sport("cycling", "indoor_cycling") == Sport.CYCLING_TRAINER
+    @pytest.mark.parametrize("sport", _FIT_SPORT_NAMES)
+    @pytest.mark.parametrize("sub_sport", [None, "generic", "indoor_cycling", "unknown"])
+    def test_output_is_none_or_valid_sport(self, sport, sub_sport):
+        result = _decode_sport(sport, sub_sport)
+        assert result is None or _is_valid_sport(result), (
+            f"_decode_sport({sport!r}, {sub_sport!r}) produced {result!r}, "
+            "which is not a valid OST sport"
+        )
 
-    def test_cycling_gps_fallback(self):
-        assert classify_sport("cycling", has_gps=True) == Sport.CYCLING_ROAD
 
-    def test_cycling_no_gps_fallback(self):
-        assert classify_sport("cycling", has_gps=False) == Sport.CYCLING
+class TestSportOverride:
+    """Caller-supplied ``metadata={"sport": ...}`` overrides are validated
+    against the taxonomy so the stored sport is always canonical or None."""
 
-    def test_running_road(self):
-        assert classify_sport("running", has_gps=True) == Sport.RUNNING_ROAD
+    def _base(self) -> ActivityMetadata:
+        return ActivityMetadata(sport="cycling")
 
-    def test_running_treadmill(self):
-        assert classify_sport("running", "treadmill") == Sport.RUNNING_TREADMILL
+    def test_valid_override_is_kept(self):
+        merged = _merge_metadata(self._base(), {"sport": "cycling.gravel"})
+        assert merged.sport == "cycling.gravel"
 
-    def test_running_trail(self):
-        assert classify_sport("running", "trail") == Sport.RUNNING_TRAIL
+    def test_override_is_normalized_to_canonical_form(self):
+        # Modifier order is normalized by the taxonomy, proving the value
+        # round-trips through ``Sport`` rather than being stored verbatim.
+        merged = _merge_metadata(
+            self._base(), {"sport": "cycling.road+virtual+stationary"}
+        )
+        assert merged.sport == "cycling.road+stationary+virtual"
 
-    def test_swimming(self):
-        assert classify_sport("swimming") == Sport.SWIMMING
+    @pytest.mark.parametrize("bad", ["gravel", "notasport", "Cycling", "cycling.banana"])
+    def test_invalid_override_raises(self, bad):
+        with pytest.raises(ValueError):
+            _merge_metadata(self._base(), {"sport": bad})
 
-    def test_hiking(self):
-        assert classify_sport("hiking") == Sport.WALKING_HIKING
+    def test_none_override_clears_sport(self):
+        merged = _merge_metadata(self._base(), {"sport": None})
+        assert merged.sport is None
 
-    def test_unknown(self):
-        assert classify_sport("paragliding") == Sport.UNKNOWN
-
-    def test_none_sport(self):
-        assert classify_sport(None) == Sport.UNKNOWN
+    def test_override_of_other_fields_is_untouched(self):
+        # Non-sport overrides must not be affected by sport validation.
+        merged = _merge_metadata(self._base(), {"name": "Morning ride"})
+        assert merged.name == "Morning ride"
+        assert merged.sport == "cycling"

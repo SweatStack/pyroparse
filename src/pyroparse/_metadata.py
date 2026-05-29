@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 
-from pyroparse._sport import classify_sport
+from open_sport_taxonomy import Sport
+from open_sport_taxonomy.platforms import garmin_fit
 
 
 @dataclass
@@ -138,20 +139,60 @@ class CourseMetadata:
         return f"CourseMetadata({', '.join(parts)})"
 
 
+def _normalize_sport_override(value: str | None) -> str | None:
+    """Validate a caller-supplied sport against the taxonomy.
+
+    Returns the canonical OST string form, or ``None`` to clear the sport.
+    Raises ``ValueError`` for anything that is not a real OST sport, so a
+    typo fails loudly instead of silently entering the data model.
+    """
+    if value is None:
+        return None
+    try:
+        return str(Sport(value))
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid sport override {value!r}. Expected an open-sport-taxonomy "
+            "sport code such as 'cycling', 'cycling.gravel', or "
+            "'cycling+stationary'. See https://pypi.org/project/open-sport-taxonomy/."
+        ) from exc
+
+
 def _merge_metadata(
     base: ActivityMetadata, overrides: dict | None
 ) -> ActivityMetadata:
-    """Return a copy of *base* with *overrides* applied (manual > file-native)."""
+    """Return a copy of *base* with *overrides* applied (manual > file-native).
+
+    A ``sport`` override is validated and normalized so that
+    ``ActivityMetadata.sport`` is always ``None`` or a canonical OST sport
+    string, regardless of whether it came from the file or the caller.
+    """
     if not overrides:
         return base
     kwargs = {f.name: getattr(base, f.name) for f in fields(base)}
     kwargs.update(overrides)
+    if "sport" in overrides:
+        kwargs["sport"] = _normalize_sport_override(overrides["sport"])
     return ActivityMetadata(**kwargs)
 
 
 # ---------------------------------------------------------------------------
 # Raw Rust dict → ActivityMetadata
 # ---------------------------------------------------------------------------
+
+def _decode_sport(sport: str | None, sub_sport: str | None) -> str | None:
+    """Map FIT sport/sub_sport enum names to a canonical OST sport string.
+
+    Returns ``None`` when the FIT file declares no sport. FIT enum names
+    that the OST SDK tables do not recognize fall back to ``"generic"``.
+    """
+    if sport is None:
+        return None
+    try:
+        return str(garmin_fit.decode(sport, sub_sport))
+    except ValueError:
+        return str(Sport.GENERIC)
+
 
 def _build_metadata(raw: dict) -> ActivityMetadata:
     """Construct an ActivityMetadata from the raw dict returned by Rust."""
@@ -176,10 +217,8 @@ def _build_metadata(raw: dict) -> ActivityMetadata:
     if sub_sport_raw:
         extra["sub_sport"] = sub_sport_raw
 
-    sport = classify_sport(sport_raw, sub_sport_raw, has_gps="gps" in metrics)
-
     return ActivityMetadata(
-        sport=str(sport),
+        sport=_decode_sport(sport_raw, sub_sport_raw),
         name=raw.get("name"),
         start_time=start_time,
         start_time_local=start_time_local,

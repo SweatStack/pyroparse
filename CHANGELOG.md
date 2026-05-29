@@ -16,6 +16,21 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
+## [Unreleased]
+
+### Changed
+- **Sport values now come from [open-sport-taxonomy](https://pypi.org/project/open-sport-taxonomy/).** `ActivityMetadata.sport` is now a canonical taxonomy code (e.g. `cycling`, `cycling.road`, `cycling+stationary`) instead of the previous custom enum. `pp.Sport` is the taxonomy's `Sport` class, re-exported.
+- Indoor activities now decode to `+stationary` modifiers (e.g. `cycling+stationary` for `indoor_cycling`, `running+stationary` for `treadmill`) instead of collapsing to the bare sport.
+- Sport specificity now derives solely from the FIT `sport`/`sub_sport` fields. The previous GPS-presence heuristic that fabricated disciplines (e.g. inferring `cycling.road` from the presence of GPS) has been removed.
+
+### Added
+- `open-sport-taxonomy>=0.5.0,<0.6` runtime dependency.
+- `metadata={"sport": ...}` overrides are validated against the taxonomy: a valid code is normalized to canonical form, `None` clears the sport, and an unrecognized code raises `ValueError`.
+
+### Removed
+- The generated `Sport` enum, the `classify_sport` helper, and `scripts/generate_sport.py`. The taxonomy is now owned and tested upstream.
+
+
 ## [0.3.6] - 2026-04-21
 
 ### Fixed

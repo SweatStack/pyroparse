@@ -26,8 +26,8 @@ class TestParquetRoundtrip:
         pq_path = tmp_path / "test.parquet"
         original.to_parquet(pq_path)
 
-        loaded = Activity.load_parquet(pq_path, metadata={"sport": "gravel"})
-        assert loaded.metadata.sport == "gravel"
+        loaded = Activity.load_parquet(pq_path, metadata={"sport": "cycling.gravel"})
+        assert loaded.metadata.sport == "cycling.gravel"
         assert loaded.metadata.start_time == original.metadata.start_time
 
 

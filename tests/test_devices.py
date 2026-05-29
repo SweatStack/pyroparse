@@ -11,7 +11,7 @@ class TestDeveloperFields:
         assert running_activity.data.num_rows == 2_831
 
     def test_sport(self, running_activity):
-        assert running_activity.metadata.sport == "running.road"
+        assert running_activity.metadata.sport == "running"
 
     def test_stryd_power_extracted(self, running_activity):
         """Stryd stores power as a developer field, not the standard power field."""
@@ -183,10 +183,14 @@ class TestPerSessionAttribution:
 
     def test_session_sports(self, multi_session):
         sports = [a.metadata.sport for a in multi_session.activities]
-        assert sports[0] == "cycling.trainer"
-        assert sports[1] == "rowing.ergometer"
-        assert sports[2] == "cycling.trainer"
-        assert sports[3] == "rowing.ergometer"
+        # Indoor brick: cycling legs carry sub_sport=indoor_cycling, which
+        # OST 0.5.0 maps to the stationary modifier. The rowing legs use
+        # sub_sport=indoor_rowing, which OST only maps to +stationary under
+        # the fitness_equipment sport, so under rowing they stay bare.
+        assert sports[0] == "cycling+stationary"
+        assert sports[1] == "rowing"
+        assert sports[2] == "cycling+stationary"
+        assert sports[3] == "rowing"
 
     def test_cycling_power_from_wattbike(self, multi_session):
         """Cycling sessions: standard power (Wattbike) should win."""

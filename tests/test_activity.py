@@ -62,7 +62,7 @@ class TestLoadFit:
 
 class TestMetadata:
     def test_sport(self, cycling_activity):
-        assert cycling_activity.metadata.sport == "cycling.road"
+        assert cycling_activity.metadata.sport == "cycling"
 
     def test_start_time_is_utc(self, cycling_activity):
         assert cycling_activity.metadata.start_time is not None
@@ -85,15 +85,15 @@ class TestMetadata:
         assert all(isinstance(d, Device) for d in devices)
 
     def test_override_with_dict(self, fit_path):
-        activity = Activity.load_fit(fit_path, metadata={"sport": "gravel"})
-        assert activity.metadata.sport == "gravel"
+        activity = Activity.load_fit(fit_path, metadata={"sport": "cycling.gravel"})
+        assert activity.metadata.sport == "cycling.gravel"
         # Non-overridden fields preserved.
         assert activity.metadata.start_time is not None
 
     def test_override_preserves_file_metadata(self, fit_path):
         activity = Activity.load_fit(fit_path, metadata={"name": "Morning Ride"})
         assert activity.metadata.name == "Morning Ride"
-        assert activity.metadata.sport == "cycling.road"
+        assert activity.metadata.sport == "cycling"
 
 
 class TestRepr:
@@ -130,7 +130,7 @@ class TestOpenFit:
         activity = Activity.open_fit(fit_path)
         assert isinstance(activity, Activity)
         meta = activity.metadata
-        assert meta.sport == "cycling.road"
+        assert meta.sport == "cycling"
         assert meta.start_time is not None
         assert meta.start_time.tzinfo is not None
         assert meta.duration is not None
@@ -145,8 +145,8 @@ class TestOpenFit:
         assert activity.data.schema.field("timestamp").type == pa.timestamp("us", tz="UTC")
 
     def test_metadata_override(self, fit_path):
-        activity = Activity.open_fit(fit_path, metadata={"sport": "gravel"})
-        assert activity.metadata.sport == "gravel"
+        activity = Activity.open_fit(fit_path, metadata={"sport": "cycling.gravel"})
+        assert activity.metadata.sport == "cycling.gravel"
         assert activity.metadata.duration is not None
 
     def test_matches_full_parser(self, fit_path):
@@ -157,7 +157,7 @@ class TestOpenFit:
         assert abs(scanned.metadata.distance - full.metadata.distance) < 1.0
 
     def test_accepts_string_path(self, fit_path):
-        assert Activity.open_fit(str(fit_path)).metadata.sport == "cycling.road"
+        assert Activity.open_fit(str(fit_path)).metadata.sport == "cycling"
 
 
 class TestOpenParquet:
@@ -172,15 +172,15 @@ class TestOpenParquet:
     def test_activity_and_metadata(self, parquet_path):
         activity = Activity.open_parquet(parquet_path)
         assert isinstance(activity, Activity)
-        assert activity.metadata.sport == "cycling.road"
+        assert activity.metadata.sport == "cycling"
         assert activity.data.num_rows == 21_666
 
     def test_metadata_override(self, parquet_path):
-        activity = Activity.open_parquet(parquet_path, metadata={"sport": "gravel"})
-        assert activity.metadata.sport == "gravel"
+        activity = Activity.open_parquet(parquet_path, metadata={"sport": "cycling.gravel"})
+        assert activity.metadata.sport == "cycling.gravel"
 
     def test_accepts_string_path(self, parquet_path):
-        assert Activity.open_parquet(str(parquet_path)).metadata.sport == "cycling.road"
+        assert Activity.open_parquet(str(parquet_path)).metadata.sport == "cycling"
 
 
 class TestSessionOpenFit:
@@ -188,5 +188,5 @@ class TestSessionOpenFit:
         session = Session.open_fit(fit_path)
         assert isinstance(session, Session)
         assert len(session.activities) == 1
-        assert session.activities[0].metadata.sport == "cycling.road"
+        assert session.activities[0].metadata.sport == "cycling"
         assert session.activities[0].data.num_rows == 21_666

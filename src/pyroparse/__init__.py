@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pyarrow as pa
+from open_sport_taxonomy import Sport
 
 from pyroparse._activity import Activity
 from pyroparse._batch import load_fit_batch, scan_fit, scan_parquet
@@ -13,7 +14,6 @@ from pyroparse._messages import all_messages
 from pyroparse._metadata import ActivityMetadata, CourseMetadata, Device, Waypoint
 from pyroparse._schema import STANDARD_COLUMNS
 from pyroparse._session import Session
-from pyroparse._sport import Sport, classify_sport
 from pyroparse._types import Source
 
 __all__ = [
@@ -31,7 +31,6 @@ __all__ = [
     "Waypoint",
     "STANDARD_COLUMNS",
     "all_messages",
-    "classify_sport",
     "convert_fit_file",
     "convert_fit_tree",
     "load_fit_batch",

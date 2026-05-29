@@ -11,7 +11,7 @@ class TestLoadFitFromBytes:
         activity = Activity.load_fit(fit_path.read_bytes())
         assert isinstance(activity, Activity)
         assert activity.data.num_rows == 21_666
-        assert activity.metadata.sport == "cycling.road"
+        assert activity.metadata.sport == "cycling"
 
 
 class TestLoadFitFromFileObject:
@@ -30,7 +30,7 @@ class TestLoadParquetFromBytes:
     def test_data_and_metadata(self, parquet_bytes):
         activity = Activity.load_parquet(parquet_bytes)
         assert activity.data.num_rows == 21_666
-        assert activity.metadata.sport == "cycling.road"
+        assert activity.metadata.sport == "cycling"
 
 
 class TestLoadParquetFromFileObject:

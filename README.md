@@ -31,7 +31,7 @@ import pyroparse as pp
 
 activity = pp.Activity.load_fit("ride.fit")
 
-activity.metadata.sport         # "cycling.road"
+activity.metadata.sport         # "cycling" (open-sport-taxonomy code)
 activity.metadata.start_time    # datetime(2024, 3, 19, 5, 30, tzinfo=UTC)
 activity.metadata.duration      # 3842.7 (seconds)
 activity.metadata.distance      # 45230.5 (meters)
@@ -47,7 +47,7 @@ activity.data                   # pyarrow.Table — 21,666 rows × 11 typed colu
 
 ```python
 activity = pp.Activity.open_fit("ride.fit")
-activity.metadata.sport     # "cycling.road" — available immediately
+activity.metadata.sport     # "cycling" — available immediately
 activity.metadata.duration  # 3842.7         — no data parsed yet
 
 activity.data               # pyarrow.Table — parsed on first access
@@ -64,7 +64,7 @@ Load it back with data and metadata intact:
 
 ```python
 loaded = pp.Activity.load_parquet("ride.parquet")
-loaded.metadata.sport      # "cycling.road"
+loaded.metadata.sport      # "cycling"
 loaded.metadata.distance   # 45230.5
 loaded.data.num_rows       # 21,666
 ```
@@ -182,7 +182,7 @@ Metadata is extracted from FIT Session and DeviceInfo messages, the same source 
 ```python
 @dataclass
 class ActivityMetadata:
-    sport: str | None               # "cycling.road", "running.trail"
+    sport: str | None               # open-sport-taxonomy code, e.g. "cycling", "running.trail"
     name: str | None                # user-given activity name
     start_time: datetime | None     # UTC
     start_time_local: datetime | None  # naive, local wall-clock time
@@ -193,13 +193,39 @@ class ActivityMetadata:
     extra: dict                     # sub_sport, anything format-specific
 ```
 
-Manual overrides merge on top of file-native values:
+Manual overrides merge on top of file-native values. A `sport` override is
+validated against the taxonomy, so a typo fails loudly instead of silently
+entering your data:
 
 ```python
-activity = pp.Activity.load_fit("ride.fit", metadata={"sport": "gravel"})
-activity.metadata.sport       # "gravel" (overridden)
-activity.metadata.duration    # 3842.7  (preserved from FIT)
+activity = pp.Activity.load_fit("ride.fit", metadata={"sport": "cycling.gravel"})
+activity.metadata.sport       # "cycling.gravel" (overridden)
+activity.metadata.duration    # 3842.7           (preserved from FIT)
+
+pp.Activity.load_fit("ride.fit", metadata={"sport": "gravel"})  # ValueError: invalid sport
 ```
+
+### Sport values
+
+The `sport` field is an [open-sport-taxonomy](https://pypi.org/project/open-sport-taxonomy/)
+code, not a free-form string. The same vocabulary is used by `pp.Sport` (the
+taxonomy's `Sport` class, re-exported for convenience). Codes use a dotted
+hierarchy for disciplines and `+` for modifiers:
+
+| Example code | Meaning |
+|---|---|
+| `cycling` | cycling, discipline unspecified |
+| `cycling.road` | road cycling |
+| `cycling.gravel` | gravel cycling |
+| `cycling+stationary` | indoor / trainer cycling |
+| `running.trail` | trail running |
+| `running+stationary` | treadmill running |
+| `generic` | sport recorded but unrecognized |
+
+Specificity comes only from the FIT `sport`/`sub_sport` fields — pyroparse never
+guesses a discipline. A road ride saved without a `sub_sport` decodes to the bare
+`cycling`, and `metadata.extra["sub_sport"]` preserves the raw FIT sub-sport name
+when present.
 
 ---
 
@@ -233,7 +259,7 @@ catalog = pp.scan_parquet("~/data/parquet/")
 
 # Filter with PyArrow compute
 import pyarrow.compute as pc
-cycling = catalog.filter(pc.field("sport") == "cycling.road")
+cycling = catalog.filter(pc.field("sport") == "cycling")
 
 # Load only the files and columns you need
 paths = cycling.column("file_path").to_pylist()
@@ -260,7 +286,7 @@ import polars as pl
 import pyroparse.polars as ppl
 
 ppl.scan_fit("~/data/")
-  .filter(pl.col("sport") == "cycling.road")
+  .filter(pl.col("sport") == "cycling")
   .fit.load_data(columns=["timestamp", "power"])
   .select("file_path", "timestamp", "power")
 ```
@@ -271,9 +297,9 @@ ppl.scan_fit("~/data/")
 import pyroparse.duckdb as ppdb
 
 catalog = ppdb.scan_fit("~/data/")
-catalog.filter("sport = 'cycling.road'").fetchdf()
+catalog.filter("sport = 'cycling'").fetchdf()
 
-paths = catalog.filter("sport = 'cycling.road'").fetchnumpy()["file_path"].tolist()
+paths = catalog.filter("sport = 'cycling'").fetchnumpy()["file_path"].tolist()
 data = ppdb.load_fit(paths, columns=["timestamp", "power"])
 data.filter("power > 300").fetchdf()
 ```
