@@ -841,11 +841,11 @@ wheels = [
 
 [[package]]
 name = "open-sport-taxonomy"
-version = "0.5.0"
+version = "0.10.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/71/06/bdd097cc5d675e40fbe52f0abe7e3f45198d87af19e8f220c6ec9fe50cb6/open_sport_taxonomy-0.5.0.tar.gz", hash = "sha256:3537f7d5ecdc9e9271a3cabec2dc4ad782bb20f6b65d15ebbd52539b82910a7d", size = 18142, upload-time = "2026-05-29T12:15:06.387Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/85/64/8b1d21077bc45a8f56d4df1decda5543b374858375d3473ff401ddcb37ea/open_sport_taxonomy-0.10.0.tar.gz", hash = "sha256:f5de512321fc0a8aa5d6cc4664b5a3a43fc6bea3ab9863fedcb7f71772874239", size = 21920, upload-time = "2026-06-12T17:48:23.141Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3a/93/196a5163488d4af8611772b849a020c84f2aa91e24377e63bc07c63c4765/open_sport_taxonomy-0.5.0-py3-none-any.whl", hash = "sha256:d35d492c203221959bb368b59ee2c2cf4d38c5ca559c553544c47f8f91a76178", size = 20196, upload-time = "2026-05-29T12:15:05.359Z" },
+    { url = "https://files.pythonhosted.org/packages/83/9e/e750931c6dda8b8512fe0cc126b6e7df7e0c1f7c7dd86fad3bb156105348/open_sport_taxonomy-0.10.0-py3-none-any.whl", hash = "sha256:eb20ef5228e280e3eee1687c6dceece6a9bbdc2df2f3920dadbe9d0ed0b257f7", size = 24552, upload-time = "2026-06-12T17:48:21.836Z" },
 ]
 
 [[package]]
@@ -1343,7 +1343,7 @@ wheels = [
 
 [[package]]
 name = "pyroparse"
-version = "0.3.6"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "open-sport-taxonomy" },
@@ -1382,7 +1382,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'scripts'" },
     { name = "matplotlib", marker = "extra == 'scripts'" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.5" },
-    { name = "open-sport-taxonomy", specifier = ">=0.5.0,<0.6" },
+    { name = "open-sport-taxonomy", specifier = ">=0.10,<0.11" },
     { name = "polars", marker = "extra == 'scripts'" },
     { name = "pyarrow", specifier = ">=14.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },

@@ -20,7 +20,7 @@ class TestScanFit:
         ]
         assert result.column_names == expected
         sports = set(result.column("sport").to_pylist())
-        assert "cycling" in sports
+        assert "cycling.road" in sports
         for path in result.column("file_path").to_pylist():
             assert Path(path).is_absolute()
 
@@ -66,7 +66,7 @@ class TestScanParquet:
         assert result.column_names == fit_result.column_names
         assert result.schema == fit_result.schema
         sports = set(result.column("sport").to_pylist())
-        assert "cycling" in sports
+        assert "cycling.road" in sports
         for path in result.column("file_path").to_pylist():
             assert Path(path).is_absolute()
 

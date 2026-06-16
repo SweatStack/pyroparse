@@ -5,7 +5,7 @@ description = "Fast and opinionated activity data parsing. Forged in Rust. Fired
 readme = "README.md"
 authors = [{ name = "Aart Goossens", email = "aart@sweatstack.no" }]
 requires-python = ">=3.10"
-dependencies = ["pyarrow>=14.0", "tqdm>=4.60", "open-sport-taxonomy>=0.5.0,<0.6"]
+dependencies = ["pyarrow>=14.0", "tqdm>=4.60", "open-sport-taxonomy>=0.10,<0.11"]
 
 [project.optional-dependencies]
 server = ["starlette", "uvicorn[standard]", "python-multipart"]

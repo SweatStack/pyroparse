@@ -16,6 +16,12 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
+## [Unreleased]
+
+### Changed
+- Updated the `open-sport-taxonomy` dependency to `>=0.10,<0.11` (from `>=0.5.0,<0.6`).
+
+
 ## [0.4.0] - 2026-05-29
 
 ### Changed

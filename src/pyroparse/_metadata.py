@@ -191,7 +191,7 @@ def _decode_sport(sport: str | None, sub_sport: str | None) -> str | None:
     try:
         return str(garmin_fit.decode(sport, sub_sport))
     except ValueError:
-        return str(Sport.GENERIC)
+        return str(Sport("generic"))
 
 
 def _build_metadata(raw: dict) -> ActivityMetadata:

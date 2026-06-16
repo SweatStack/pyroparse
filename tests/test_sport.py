@@ -36,12 +36,15 @@ class TestDecodeSport:
         [
             ("cycling", "road",    "cycling.road"),
             ("cycling", "gravel_cycling", "cycling.gravel"),
-            ("cycling", "generic", "cycling"),
-            ("cycling", None,      "cycling"),
+            # Since OST 0.9.0 the generic Garmin code decodes to the dominant
+            # discipline: cycling/generic -> cycling.road, running/generic ->
+            # running.road (modern devices write road rides/runs to generic).
+            ("cycling", "generic", "cycling.road"),
+            ("cycling", None,      "cycling.road"),
             ("cycling", "indoor_cycling", "cycling+stationary"),
             ("running", "trail",   "running.trail"),
             ("running", "treadmill", "running+stationary"),
-            ("running", "generic", "running"),
+            ("running", "generic", "running.road"),
             ("swimming", "open_water", "swimming.open_water"),
         ],
     )
@@ -55,12 +58,10 @@ class TestDecodeSport:
     def test_unknown_fit_name_falls_back_to_generic(self):
         assert _decode_sport("paragliding", None) == "generic"
 
-    def test_known_but_unmapped_sub_sport_falls_back_to_generic(self):
-        # ``downhill`` is a recognised FIT sub_sport but has no OST
-        # mapping. OST 0.5.0's data-driven coarsening has no rule that
-        # reduces it to the bare sport, so it falls all the way back to
-        # ``generic`` rather than ``cycling``.
-        assert _decode_sport("cycling", "downhill") == "generic"
+    def test_downhill_sub_sport_maps_to_mountain(self):
+        # Since OST 0.8.4 ``cycling/downhill`` decodes to ``cycling.mountain``
+        # (it previously had no mapping and fell back to ``generic``).
+        assert _decode_sport("cycling", "downhill") == "cycling.mountain"
 
     def test_genuinely_unknown_fit_value_falls_back_to_generic(self):
         # Out-of-range FIT enum values are emitted by the Rust layer as the
