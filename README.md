@@ -137,7 +137,7 @@ FIT files are a mess. `enhanced_speed` vs `speed`, semicircle-encoded GPS, manuf
 These 11 columns are the default output. Use `columns="all"` to get additional columns like `core_temperature`, `smo2`, `form_power`, and `stance_time` from CIQ apps and running dynamics, plus `length` and `swim_stroke` for pool swims (see [Swimming](#swimming)).
 
 > [!NOTE]
-> For pool swims, `distance`, `speed`, and `cadence` are **reconstructed** from FIT Length messages rather than measured — the underwater Record stream carries only heart rate. They reconcile exactly with the file's totals but are per-length constants, not per-second measurements. See [Swimming](#swimming).
+> For pool swims, `distance`, `speed`, and `cadence` are **reconstructed** from FIT Length messages rather than measured — the underwater Record stream carries only heart rate. `distance` is interpolated per record and reconciles exactly with the session total; `speed` and `cadence` are per-length averages held constant across each length, not true per-second signals. See [Swimming](#swimming).
 
 These types are native across the ecosystem, no casting, no surprises:
 
@@ -190,10 +190,14 @@ activity = pp.Activity.load_fit("pool-swim.fit")
 df = pl.from_arrow(activity.data)
 
 df["distance"].max()            # 1500.0 — reconstructed, reconciles with the session total
-df.group_by("lap").agg(pl.col("distance").max())   # per-interval distance, no special API
+
+# Distance per lap (interval). `distance` is cumulative, so subtract within each lap:
+df.group_by("lap").agg(
+    (pl.col("distance").max() - pl.col("distance").min()).alias("lap_distance")
+)
 ```
 
-`distance` is cumulative and monotonic; `speed` and `cadence` are the per-length averages (constant within a length, null while resting). Because these are **reconstructed** rather than measured, pyroparse says so — and exposes the pool length:
+The three columns are stretched over each length's records differently. `distance` **ramps** smoothly within a length, so it's a genuine per-record cumulative curve, landing on the exact total at each wall. `speed` and `cadence` are the length's **average held constant** across all its records (there's no intra-length pace variation to recover — the file stores one average per length), and both are `null` while resting. Because these are **reconstructed** rather than measured, pyroparse says so — and exposes the pool length:
 
 ```python
 activity.metadata.extra["pool_length"]            # 25.0 (metres)
@@ -211,7 +215,7 @@ Two opt-in extra columns describe the pool-length structure (via `columns="all"`
 activity = pp.Activity.load_fit("pool-swim.fit", extra_columns=["length", "swim_stroke"])
 df = pl.from_arrow(activity.data)
 
-# Pace per 100 m for each length
+# Average speed per length (pace per 100 m = 100 / speed)
 df.group_by("length").agg(pl.col("speed").first())
 # Isolate the butterfly lengths
 df.filter(pl.col("swim_stroke") == "butterfly")
