@@ -16,7 +16,7 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
-## [Unreleased]
+## [0.6.0] - 2026-08-13
 
 ### Added
 - **Pool-swim distance, pace, and cadence.** For lap (pool) swimming the FIT Record stream carries only heart rate; `distance`, `speed`, and `cadence` are now reconstructed from per-pool-length Length messages. Distance is cumulative and reconciles exactly with the session total. Two opt-in extra columns, `length` (0-based pool-length index) and `swim_stroke`, describe the pool-length structure. `ActivityMetadata.extra` gains `pool_length` and `reconstructed_columns` so consumers can tell reconstructed values from measured ones. Reconstruction activates only when a file has Length messages and never overwrites a measured value, so non-pool-swim files are unchanged. See [docs/FIT-FORMAT.md](docs/FIT-FORMAT.md).
