@@ -34,6 +34,7 @@ implementation (v0.10.0, SDK 21.171.00).
 22. [Activity file structure](#22-activity-file-structure)
 23. [Truncated and corrupt files](#23-truncated-and-corrupt-files)
 24. [Key message types for activity parsing](#24-key-message-types-for-activity-parsing)
+25. [Pool-swim distance reconstruction](#25-pool-swim-distance-reconstruction)
 
 ---
 
@@ -1032,6 +1033,29 @@ One per lap. Marks boundaries for per-lap analysis.
 4=position_lap, 5=position_waypoint, 6=position_marked, 7=session_end,
 8=fitness_equipment.
 
+### length (global #101)
+
+One per pool length in lap-swim mode. This is where a pool swim's movement data
+lives — the Record stream underwater carries only heart rate. See
+[§25](#25-pool-swim-distance-reconstruction).
+
+| Field # | Name | Type | Scale | Units |
+|---------|------|------|-------|-------|
+| 2 | start_time | uint32 | 1 | s |
+| 3 | total_elapsed_time | uint32 | 1000 | s |
+| 6 | avg_speed | uint16 | 1000 | m/s |
+| 7 | swim_stroke | enum | — | — |
+| 9 | avg_swimming_cadence | uint8 | 1 | strokes/min |
+| 12 | length_type | enum | — | — |
+
+`length_type`: 0=idle (rest, no strokes), 1=active (one pool length swum).
+`swim_stroke`: 0=freestyle, 1=backstroke, 2=breaststroke, 3=butterfly, 4=drill,
+5=mixed, 6=im, 7=im_by_round, 8=rimo.
+
+> **The per-length `timestamp` (field 253) is unreliable** — some devices pin it
+> to a constant. Use `start_time` (field 2) for placement; `total_elapsed_time`
+> gives the length's duration.
+
 ### event (global #21)
 
 Timer start/stop, gear changes, recovery HR measurements.
@@ -1052,3 +1076,49 @@ Top-level container. One per file, summarizes session count.
 | 253 | timestamp | uint32 | 1 | s |
 | 5 | local_timestamp | uint32 | 1 | s |
 | 1 | num_sessions | uint16 | — | — |
+
+## 25. Pool-swim distance reconstruction
+
+Pool ("lap") swimming breaks the assumption that the Record stream carries the
+movement data. Underwater there is no GPS or speed sensor, so Record messages
+carry only heart rate; distance, pace, strokes, and stroke type live in
+[Length messages](#length-global-101), summarized into `lap` and `session`.
+Pyroparse reconstructs the missing Record columns (`distance`, `speed`,
+`cadence`) and adds `length`/`swim_stroke`, so a pool swim behaves like any other
+activity. Implementation: `assign_lengths` in `src/lib.rs`; design and validation
+in `plans/029-POOL-SWIM-DISTANCE.md`.
+
+### The definitional invariant
+
+The Length message has **no distance field** — per-length distance is
+*definitional*: one `active` length equals `session.pool_length` (field 44,
+metres). So cumulative distance after *N* active lengths is `N × pool_length`,
+which reproduces `session.total_distance` **exactly**. This, not any stored
+per-length distance, is the anchor.
+
+### Algorithm
+
+Per session, for each Record:
+
+1. Assign it to the length with the greatest `start_time ≤` its timestamp
+   (carry-forward). This is the **only** basis for assignment — never the
+   per-length `timestamp` (unreliable) nor `start_time + elapsed`.
+2. `distance` = cumulative-at-start-of-length `+ pool_length ×
+   clamp((t − start) / total_elapsed_time, 0, 1)` for an active length; held flat
+   for an idle (rest) length. Distance is monotone and integrates a
+   piecewise-constant speed, so `distance′ = speed` holds — the ramp is the
+   *unique* representation consistent with the reconstructed `speed`.
+3. `speed` = `pool_length / total_elapsed_time` (active lengths only); `cadence` =
+   `avg_swimming_cadence`; `swim_stroke` = the length's stroke; `length` = index.
+
+### Two rules that matter
+
+- **Assignment is by `start_time` carry-forward, never by duration.** A paused
+  rest is encoded as an idle length with an absurd `total_elapsed_time` (~131 071 s
+  observed in real files). Because assignment ignores duration and idle lengths
+  add zero distance, such outliers cannot distort the result.
+- **All-or-nothing per column, and only when Length messages exist.** A column is
+  reconstructed only if the whole session's Records lack a measured value for it,
+  so measured and reconstructed values never mix, and open-water/lengthless files
+  are untouched. Reconstructed columns are reported in
+  `metadata.extra["reconstructed_columns"]`.

@@ -24,6 +24,8 @@ _STANDARD_COLUMNS_SET = frozenset(STANDARD_COLUMNS)
 
 # Known types for standard and canonical extra columns.
 # Used by select_columns() to create typed null columns when missing="ignore".
+# `length` and `swim_stroke` are opt-in pool-swim extras (present only when a
+# file has Length messages); see plans/029 and the README Swimming section.
 _CANONICAL_TYPES: dict[str, pa.DataType] = {
     "timestamp": pa.timestamp("us", tz="UTC"),
     "heart_rate": pa.int16(),
@@ -37,6 +39,8 @@ _CANONICAL_TYPES: dict[str, pa.DataType] = {
     "distance": pa.float64(),
     "lap": pa.int16(),
     "lap_trigger": pa.utf8(),
+    "length": pa.int16(),
+    "swim_stroke": pa.utf8(),
     "core_temperature": pa.float32(),
     "smo2": pa.float32(),
 }

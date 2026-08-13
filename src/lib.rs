@@ -268,6 +268,9 @@ pub(crate) struct SessionMeta {
     pub(crate) start_time_local: Option<f64>,
     pub(crate) duration: Option<f64>,
     pub(crate) distance: Option<f64>,
+    /// Pool length in metres (Session field 44), present only for pool swims.
+    /// Anchors per-record distance reconstruction — see [`assign_lengths`].
+    pub(crate) pool_length: Option<f64>,
     pub(crate) start_timestamp_us: Option<i64>,
     pub(crate) end_timestamp_us: Option<i64>,
 }
@@ -291,6 +294,31 @@ pub(crate) struct LapBoundary {
     pub(crate) trigger: Option<String>,
 }
 
+/// A pool "length" interval extracted from a FIT Length message (mesg 101).
+///
+/// In lap (pool) swimming the Record stream carries no distance/speed/cadence —
+/// those live per pool length here. [`assign_lengths`] reconstructs the missing
+/// Record columns from these intervals. See `plans/029-POOL-SWIM-DISTANCE.md`
+/// and `docs/FIT-FORMAT.md` for the model and its rationale.
+#[derive(Clone)]
+pub(crate) struct LengthInterval {
+    /// Length start (Length field 2), microseconds since Unix epoch. This is the
+    /// **sole** basis for record→length assignment (carry-forward). The per-length
+    /// `timestamp` (field 253) is unreliable on some devices and is never used.
+    pub(crate) start_time_us: i64,
+    /// total_elapsed_time (field 3), seconds. Used **only** for the intra-length
+    /// ramp of *active* lengths; never for assignment (idle `total_elapsed_time`
+    /// can be absurd — e.g. a paused rest encoded as ~131 071 s).
+    pub(crate) duration_s: f64,
+    /// `length_type == active` (field 12). Active lengths contribute `pool_length`
+    /// metres; idle lengths (rest) contribute zero.
+    pub(crate) active: bool,
+    /// avg_swimming_cadence (field 9), strokes/min.
+    pub(crate) cadence: Option<i16>,
+    /// swim_stroke (field 7), decoded enum name.
+    pub(crate) swim_stroke: Option<String>,
+}
+
 pub(crate) struct ParseResult {
     pub(crate) file_type: Option<String>,
     pub(crate) records: Vec<RecordRow>,
@@ -302,6 +330,9 @@ pub(crate) struct ParseResult {
     pub(crate) devices: Vec<DeviceMeta>,
     pub(crate) developer_sensors: Vec<DeveloperSensor>,
     pub(crate) laps: Vec<LapBoundary>,
+    /// Pool-swim Length intervals, sorted by `start_time_us`. Empty for every
+    /// non-pool-swim file.
+    pub(crate) lengths: Vec<LengthInterval>,
 }
 
 // ---------------------------------------------------------------------------
@@ -399,12 +430,152 @@ fn assign_laps(
     (lap_indices, lap_triggers)
 }
 
+/// Reconstructed per-record columns for a pool swim, one entry per record.
+/// `distance`/`speed` are `None` throughout when no `pool_length` anchor is
+/// available — we never fabricate distance without one.
+struct LengthColumns {
+    distance: Vec<Option<f64>>,
+    speed: Vec<Option<f32>>,
+    cadence: Vec<Option<i16>>,
+    stroke: Vec<Option<String>>,
+    index: Vec<i16>,
+}
+
+/// Reconstruct `distance`/`speed`/`cadence`/`swim_stroke`/`length` for each
+/// record from pool-swim [`LengthInterval`]s. `lengths` must be sorted by
+/// `start_time_us` and non-empty.
+///
+/// Each record is assigned to the length with the greatest `start_time_us <=`
+/// its timestamp (carry-forward) — so rest gaps between lengths, and the
+/// unreliable per-length `timestamp` field, never affect assignment. Within an
+/// *active* length distance ramps linearly by elapsed-time fraction: the unique
+/// representation consistent with a piecewise-constant `speed` (`distance′ =
+/// speed`). Distance is anchored on the running active-length count times
+/// `pool_length`, so it is monotone non-decreasing and its maximum equals
+/// `session.total_distance` exactly. See `plans/029-POOL-SWIM-DISTANCE.md`.
+fn assign_lengths(
+    records: &[RecordRow],
+    lengths: &[LengthInterval],
+    pool_length: Option<f64>,
+) -> LengthColumns {
+    let n = records.len();
+
+    // cum_start[i] = reconstructed distance (m) at the *start* of length i,
+    // i.e. the sum of pool_length over all preceding active lengths. Only
+    // meaningful when we have a pool_length anchor.
+    let cum_start: Vec<f64> = match pool_length {
+        Some(pool) => {
+            let mut acc = 0.0;
+            let mut v = Vec::with_capacity(lengths.len());
+            for l in lengths {
+                v.push(acc);
+                if l.active {
+                    acc += pool;
+                }
+            }
+            v
+        }
+        None => Vec::new(),
+    };
+
+    let mut distance = Vec::with_capacity(n);
+    let mut speed = Vec::with_capacity(n);
+    let mut cadence = Vec::with_capacity(n);
+    let mut stroke: Vec<Option<String>> = Vec::with_capacity(n);
+    let mut index = Vec::with_capacity(n);
+
+    let first_start = lengths.first().map(|l| l.start_time_us);
+
+    for record in records {
+        let ts = record.timestamp.unwrap_or(0);
+
+        // Records before the first length (warmup at the wall) belong to no
+        // length: index 0, distance 0, no pace/stroke.
+        let before_first = match first_start {
+            Some(start) => ts < start,
+            None => true,
+        };
+        if before_first {
+            index.push(0);
+            distance.push(pool_length.map(|_| 0.0));
+            speed.push(None);
+            cadence.push(None);
+            stroke.push(None);
+            continue;
+        }
+
+        // Carry-forward: greatest start_time_us <= ts. `pos >= 1` here because
+        // ts >= first_start, so `li` is in bounds.
+        let pos = lengths.partition_point(|l| l.start_time_us <= ts);
+        let li = pos - 1;
+        let length = &lengths[li];
+
+        index.push(li as i16);
+        cadence.push(length.cadence);
+        stroke.push(length.swim_stroke.clone());
+
+        let Some(pool) = pool_length else {
+            distance.push(None);
+            speed.push(None);
+            continue;
+        };
+
+        if length.active && length.duration_s > 0.0 {
+            let elapsed_us = length.duration_s * 1_000_000.0;
+            let frac = (((ts - length.start_time_us) as f64) / elapsed_us).clamp(0.0, 1.0);
+            distance.push(Some(cum_start[li] + pool * frac));
+            speed.push(Some((pool / length.duration_s) as f32));
+        } else if length.active {
+            // Ramp guard: active length with non-positive `total_elapsed_time`
+            // (a corrupt duration). Attribute the whole pool length at once
+            // rather than divide by zero; distance stays monotone, pace unknown.
+            distance.push(Some(cum_start[li] + pool));
+            speed.push(None);
+        } else {
+            // Idle length (rest): distance holds flat, no pace.
+            distance.push(Some(cum_start[li]));
+            speed.push(None);
+        }
+    }
+
+    LengthColumns { distance, speed, cadence, stroke, index }
+}
+
+/// Build the Arrow RecordBatch for a set of records.
+///
+/// Returns the batch and the list of standard columns whose values were
+/// *reconstructed* from pool-swim Length messages (rather than measured) — empty
+/// for every non-pool-swim file. See [`assign_lengths`].
 fn build_batch(
     records: &[RecordRow],
     extra_col_info: &[(String, DataType)],
     extra_data: &[TypedColumn],
     laps: &[LapBoundary],
-) -> PyResult<RecordBatch> {
+    lengths: &[LengthInterval],
+    pool_length: Option<f64>,
+) -> PyResult<(RecordBatch, Vec<String>)> {
+    // Pool-swim reconstruction. Present only when the file has Length messages.
+    let recon = if lengths.is_empty() {
+        None
+    } else {
+        Some(assign_lengths(records, lengths, pool_length))
+    };
+
+    // Gate: reconstruct a standard column only when Length data exists *and* the
+    // Record stream carries no measured value for it — all-or-nothing per column,
+    // so a column is never a mix of measured and reconstructed values.
+    let reconstruct_distance =
+        recon.is_some() && records.iter().all(|r| r.distance.is_none());
+    let reconstruct_speed =
+        recon.is_some() && records.iter().all(|r| r.speed.is_none());
+    let reconstruct_cadence =
+        recon.is_some() && records.iter().all(|r| r.cadence.is_none());
+
+    let mut reconstructed_columns = Vec::new();
+    if reconstruct_distance { reconstructed_columns.push("distance".to_string()); }
+    if reconstruct_speed { reconstructed_columns.push("speed".to_string()); }
+    if reconstruct_cadence { reconstructed_columns.push("cadence".to_string()); }
+
     // Schema: 12 fixed columns, then extras alphabetically.
     // Canonical extras from RecordRow (core_temperature, smo2) — only include
     // if they have at least one non-null value, sorted into the extras.
@@ -456,6 +627,19 @@ fn build_batch(
         ));
     }
 
+    // Pool-swim structural extras: `length` (0-based index) whenever Length
+    // messages exist, and `swim_stroke` when any length carries a stroke.
+    if let Some(recon) = &recon {
+        canonical_extras.push((
+            "length".into(),
+            Arc::new(Int16Array::from(recon.index.clone())),
+        ));
+        if recon.stroke.iter().any(|s| s.is_some()) {
+            let stroke_arr: StringArray = recon.stroke.iter().map(|s| s.as_deref()).collect();
+            canonical_extras.push(("swim_stroke".into(), Arc::new(stroke_arr)));
+        }
+    }
+
     // Merge canonical extras and dynamic extras into one sorted list.
     let mut all_extras: Vec<(&str, &DataType, Option<&Arc<dyn arrow::array::Array>>)> = Vec::new();
     for (name, arr) in &canonical_extras {
@@ -472,6 +656,24 @@ fn build_batch(
     }
     let schema = Schema::new(fields);
 
+    // Fixed columns whose values may be reconstructed for pool swims. When the
+    // gate is off, they are built straight from the Record stream as before.
+    let cadence_arr: Arc<dyn arrow::array::Array> = if reconstruct_cadence {
+        Arc::new(Int16Array::from(recon.as_ref().unwrap().cadence.clone()))
+    } else {
+        Arc::new(Int16Array::from_iter(records.iter().map(|r| r.cadence)))
+    };
+    let speed_arr: Arc<dyn arrow::array::Array> = if reconstruct_speed {
+        Arc::new(Float32Array::from(recon.as_ref().unwrap().speed.clone()))
+    } else {
+        Arc::new(Float32Array::from_iter(records.iter().map(|r| r.speed)))
+    };
+    let distance_arr: Arc<dyn arrow::array::Array> = if reconstruct_distance {
+        Arc::new(Float64Array::from(recon.as_ref().unwrap().distance.clone()))
+    } else {
+        Arc::new(Float64Array::from_iter(records.iter().map(|r| r.distance)))
+    };
+
     let mut arrays: Vec<Arc<dyn arrow::array::Array>> = vec![
         Arc::new(
             TimestampMicrosecondArray::from(
@@ -481,8 +683,8 @@ fn build_batch(
         ),
         Arc::new(Int16Array::from_iter(records.iter().map(|r| r.heart_rate))),
         Arc::new(Int16Array::from_iter(records.iter().map(|r| r.power))),
-        Arc::new(Int16Array::from_iter(records.iter().map(|r| r.cadence))),
-        Arc::new(Float32Array::from_iter(records.iter().map(|r| r.speed))),
+        cadence_arr,
+        speed_arr,
         Arc::new(Float64Array::from_iter(records.iter().map(|r| r.latitude))),
         Arc::new(Float64Array::from_iter(
             records.iter().map(|r| r.longitude),
@@ -491,7 +693,7 @@ fn build_batch(
         Arc::new(Int8Array::from_iter(
             records.iter().map(|r| r.temperature),
         )),
-        Arc::new(Float64Array::from_iter(records.iter().map(|r| r.distance))),
+        distance_arr,
         Arc::new(Int16Array::from(lap_indices)),
     ];
     let mut extra_data_idx = 0;
@@ -504,8 +706,9 @@ fn build_batch(
         }
     }
 
-    RecordBatch::try_new(Arc::new(schema), arrays)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    let batch = RecordBatch::try_new(Arc::new(schema), arrays)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok((batch, reconstructed_columns))
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +767,7 @@ fn session_to_dict<'py>(
     dict.set_item("start_time_local", session.start_time_local)?;
     dict.set_item("duration", session.duration)?;
     dict.set_item("distance", session.distance)?;
+    dict.set_item("pool_length", session.pool_length)?;
     Ok(dict)
 }
 
@@ -605,6 +809,7 @@ fn build_activity_dict<'py>(
     session: Option<&SessionMeta>,
     devices: &[DeviceMeta],
     developer_sensors: &[DeveloperSensor],
+    reconstructed_columns: &[String],
 ) -> PyResult<Bound<'py, PyDict>> {
     let metrics = detect_metrics(batch);
 
@@ -620,13 +825,19 @@ fn build_activity_dict<'py>(
             let d = PyDict::new_bound(py);
             for key in [
                 "sport", "sub_sport", "name", "start_time", "start_time_local",
-                "duration", "distance",
+                "duration", "distance", "pool_length",
             ] {
                 d.set_item(key, py.None())?;
             }
             d
         }
     };
+
+    // Provenance: columns whose values were reconstructed from Length messages
+    // rather than measured (empty for every non-pool-swim file).
+    let reconstructed_list = PyList::empty_bound(py);
+    for c in reconstructed_columns { reconstructed_list.append(c)?; }
+    meta.set_item("reconstructed_columns", reconstructed_list)?;
 
     let metrics_list = PyList::empty_bound(py);
     for m in &metrics { metrics_list.append(m)?; }
@@ -887,8 +1098,10 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
     if parsed.sessions.len() <= 1 {
         // Single session (or no sessions): merge across all records.
         let dev_won = resolve_merge(&mut parsed.records);
-        let batch = build_batch(
+        let pool_length = parsed.sessions.first().and_then(|s| s.pool_length);
+        let (batch, reconstructed) = build_batch(
             &parsed.records, &parsed.extra_col_info, &parsed.extra_data, &parsed.laps,
+            &parsed.lengths, pool_length,
         )?;
         let metrics = detect_metrics(&batch);
         let deduped = dedup_devices(&parsed.devices);
@@ -901,12 +1114,16 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             parsed.sessions.first(),
             &devices,
             &sensors,
+            &reconstructed,
         )?)?;
     } else {
         // Multi-session: slice records per session, merge each independently.
-        // Build full batch with all laps for the extras columns.
-        let batch = build_batch(
+        // The full batch supplies the *dynamic extra* columns only; it is built
+        // without Length data (pool_length is per-session, and length/swim_stroke
+        // come from each session_batch so their indices reset per session).
+        let (batch, _) = build_batch(
             &parsed.records, &parsed.extra_col_info, &parsed.extra_data, &parsed.laps,
+            &[], None,
         )?;
         let device_groups =
             split_devices_per_session(&parsed.devices, parsed.sessions.len());
@@ -938,13 +1155,24 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
                 })
                 .collect();
 
+            // Filter Length intervals to this session and re-index from 0.
+            let session_lengths: Vec<LengthInterval> = parsed.lengths
+                .iter()
+                .filter(|l| l.start_time_us >= start && l.start_time_us <= end)
+                .cloned()
+                .collect();
+
             // Resolve merge on a mutable slice of this session's records.
             let session_records = &mut parsed.records[first..first + len];
             let dev_won = resolve_merge(session_records);
 
-            // Rebuild fixed columns (+ canonical extras) from the now-resolved
-            // records.  Dynamic extras come from the pre-built batch via slice.
-            let session_batch = build_batch(session_records, &[], &[], &session_laps)?;
+            // Rebuild fixed columns (+ canonical extras, incl. pool-swim
+            // reconstruction) from the now-resolved records.  Dynamic extras come
+            // from the pre-built batch via slice.
+            let (session_batch, reconstructed) = build_batch(
+                session_records, &[], &[], &session_laps,
+                &session_lengths, session.pool_length,
+            )?;
             let full_batch = merge_fixed_with_extras(&session_batch, &batch.slice(first, len))?;
 
             let metrics = detect_metrics(&full_batch);
@@ -958,6 +1186,7 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
                 Some(session),
                 &devices,
                 &sensors,
+                &reconstructed,
             )?)?;
         }
     }
@@ -1281,6 +1510,152 @@ mod tests {
             let (indices, triggers) = assign_laps(&[], &[]);
             assert!(indices.is_empty());
             assert!(triggers.is_empty());
+        }
+    }
+
+    // ── Pool-swim length reconstruction ──────────────────────────────────
+
+    mod length_reconstruction {
+        use super::*;
+
+        /// Record at `t` seconds (timestamps are stored in microseconds).
+        fn rec(t: i64) -> RecordRow {
+            RecordRow { timestamp: Some(t * 1_000_000), ..Default::default() }
+        }
+
+        fn active(start_s: i64, dur_s: f64) -> LengthInterval {
+            LengthInterval {
+                start_time_us: start_s * 1_000_000,
+                duration_s: dur_s,
+                active: true,
+                cadence: Some(30),
+                swim_stroke: Some("freestyle".into()),
+            }
+        }
+
+        fn idle(start_s: i64, dur_s: f64) -> LengthInterval {
+            LengthInterval {
+                start_time_us: start_s * 1_000_000,
+                duration_s: dur_s,
+                active: false,
+                cadence: None,
+                swim_stroke: None,
+            }
+        }
+
+        #[test]
+        fn distance_ramps_and_reconciles_exactly() {
+            // Two 25 m active lengths, 20 s each. Distance ramps 0→25→50 and its
+            // maximum equals num_active × pool exactly.
+            let lengths = vec![active(0, 20.0), active(20, 20.0)];
+            let records = vec![rec(0), rec(10), rec(20), rec(30), rec(40)];
+            let c = assign_lengths(&records, &lengths, Some(25.0));
+            assert_eq!(
+                c.distance,
+                vec![Some(0.0), Some(12.5), Some(25.0), Some(37.5), Some(50.0)]
+            );
+            assert_eq!(c.index, vec![0, 0, 1, 1, 1]);
+            // speed = pool / duration = 25 / 20 = 1.25 m/s on every active row.
+            assert!(c.speed.iter().all(|s| *s == Some(1.25)));
+            assert_eq!(c.cadence, vec![Some(30); 5]);
+        }
+
+        #[test]
+        fn distance_is_monotone_non_decreasing() {
+            let lengths = vec![active(0, 20.0), idle(20, 10.0), active(30, 20.0)];
+            let records: Vec<_> = (0..=50).map(rec).collect();
+            let c = assign_lengths(&records, &lengths, Some(25.0));
+            let vals: Vec<f64> = c.distance.iter().map(|d| d.unwrap()).collect();
+            assert!(vals.windows(2).all(|w| w[0] <= w[1]));
+            assert!(vals.iter().all(|v| v.is_finite()));
+        }
+
+        #[test]
+        fn non_25_pool_scales() {
+            // Same shape, 50 m pool → distances double, total is 100 m.
+            let lengths = vec![active(0, 20.0), active(20, 20.0)];
+            let records = vec![rec(0), rec(10), rec(40)];
+            let c = assign_lengths(&records, &lengths, Some(50.0));
+            assert_eq!(c.distance, vec![Some(0.0), Some(25.0), Some(100.0)]);
+        }
+
+        #[test]
+        fn idle_length_holds_distance_flat_and_has_no_pace() {
+            let lengths = vec![active(0, 20.0), idle(20, 10.0), active(30, 20.0)];
+            let c = assign_lengths(&[rec(25)], &lengths, Some(25.0));
+            // Mid-rest: distance sits at the 25 m already swum, no speed/stroke.
+            assert_eq!(c.distance, vec![Some(25.0)]);
+            assert_eq!(c.speed, vec![None]);
+            assert_eq!(c.stroke, vec![None]);
+            assert_eq!(c.index, vec![1]);
+        }
+
+        #[test]
+        fn zero_duration_active_length_ramp_guard() {
+            // A corrupt zero-elapsed active length must not divide by zero; it
+            // attributes the whole pool length at once, pace unknown, no NaN.
+            let lengths = vec![active(0, 20.0), active(20, 0.0), active(21, 20.0)];
+            let c = assign_lengths(&[rec(20), rec(21), rec(41)], &lengths, Some(25.0));
+            assert_eq!(c.distance[0], Some(50.0)); // 25 (first) + 25 (guarded)
+            assert_eq!(c.speed[0], None);
+            assert!(c.distance.iter().all(|d| d.unwrap().is_finite()));
+        }
+
+        #[test]
+        fn huge_idle_elapsed_does_not_affect_assignment() {
+            // A paused rest encoded as an idle length with an absurd elapsed time
+            // (~131 071 s seen in real files). Assignment is by start_time
+            // carry-forward, so the bogus duration is irrelevant.
+            let lengths = vec![active(0, 20.0), idle(20, 131_071.0), active(300, 20.0)];
+            let c = assign_lengths(&[rec(20), rec(100), rec(300)], &lengths, Some(25.0));
+            assert_eq!(c.index, vec![1, 1, 2]); // rec(100) carries forward into idle
+            assert_eq!(c.distance, vec![Some(25.0), Some(25.0), Some(25.0)]);
+            assert!(c.distance.iter().all(|d| d.unwrap().is_finite()));
+        }
+
+        #[test]
+        fn all_idle_degenerate_swim_is_zero_distance() {
+            // An aborted swim: only idle lengths, no distance, must not panic.
+            let lengths = vec![idle(0, 10.0), idle(10, 10.0)];
+            let c = assign_lengths(&[rec(0), rec(5), rec(15)], &lengths, Some(25.0));
+            assert_eq!(c.distance, vec![Some(0.0), Some(0.0), Some(0.0)]);
+            assert!(c.speed.iter().all(|s| s.is_none()));
+        }
+
+        #[test]
+        fn missing_pool_length_yields_no_distance_but_keeps_structure() {
+            // Without an anchor we never fabricate distance, but the length index,
+            // cadence and stroke are still surfaced.
+            let lengths = vec![active(0, 20.0)];
+            let c = assign_lengths(&[rec(0), rec(10)], &lengths, None);
+            assert!(c.distance.iter().all(|d| d.is_none()));
+            assert!(c.speed.iter().all(|s| s.is_none()));
+            assert_eq!(c.index, vec![0, 0]);
+            assert_eq!(c.cadence, vec![Some(30), Some(30)]);
+            assert_eq!(c.stroke, vec![Some("freestyle".into()), Some("freestyle".into())]);
+        }
+
+        #[test]
+        fn missing_optional_fields_handled() {
+            let mut length = active(0, 20.0);
+            length.cadence = None;
+            length.swim_stroke = None;
+            let c = assign_lengths(&[rec(0)], &[length], Some(25.0));
+            assert_eq!(c.cadence, vec![None]);
+            assert_eq!(c.stroke, vec![None]);
+            assert_eq!(c.distance, vec![Some(0.0)]); // distance still reconstructed
+        }
+
+        #[test]
+        fn records_before_first_length_are_warmup() {
+            // Standing at the wall before the first stroke: length 0, distance 0,
+            // no pace or stroke.
+            let lengths = vec![active(10, 20.0)];
+            let c = assign_lengths(&[rec(0), rec(10)], &lengths, Some(25.0));
+            assert_eq!(c.index, vec![0, 0]);
+            assert_eq!(c.distance, vec![Some(0.0), Some(0.0)]);
+            assert_eq!(c.speed, vec![None, Some(1.25)]);
+            assert_eq!(c.stroke, vec![None, Some("freestyle".into())]);
         }
     }
 

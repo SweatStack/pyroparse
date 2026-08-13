@@ -16,6 +16,15 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
+## [Unreleased]
+
+### Added
+- **Pool-swim distance, pace, and cadence.** For lap (pool) swimming the FIT Record stream carries only heart rate; `distance`, `speed`, and `cadence` are now reconstructed from per-pool-length Length messages. Distance is cumulative and reconciles exactly with the session total. Two opt-in extra columns, `length` (0-based pool-length index) and `swim_stroke`, describe the pool-length structure. `ActivityMetadata.extra` gains `pool_length` and `reconstructed_columns` so consumers can tell reconstructed values from measured ones. Reconstruction activates only when a file has Length messages and never overwrites a measured value, so non-pool-swim files are unchanged. See [docs/FIT-FORMAT.md](docs/FIT-FORMAT.md).
+
+### Fixed
+- **Profile generator drift.** `scripts/profile.toml` did not list the `course`/`course_point` messages or the `course_point` enum, even though the decoder relies on them — so regenerating `src/fit/profile.rs` would have dropped symbols and broken the build. The config now matches what the code needs. The generated `course_point` enum function is named `course_point_name` (the SDK type name), replacing the previous non-standard `course_point_type_name`.
+
+
 ## [0.5.0] - 2026-06-16
 
 ### Changed

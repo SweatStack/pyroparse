@@ -19,7 +19,7 @@ use crate::fields::{normalize_field_name, is_canonical_column, is_handled_field}
 use crate::types::{TypedColumn, promote_type, base_type_to_arrow};
 use crate::{
     SessionMeta, DeviceMeta, ScanResult, ParseResult,
-    RecordRow, LapBoundary, SEMICIRCLE_TO_DEGREES,
+    RecordRow, LapBoundary, LengthInterval, SEMICIRCLE_TO_DEGREES,
     CourseResult, CoursePoint, CourseMeta,
     classify_developer_sensors, bytes_to_uuid,
     column_for_developer_field,
@@ -306,6 +306,12 @@ fn decode_session(def: &MessageDef, field_bytes: &[u8]) -> SessionMeta {
                     s.distance = Some(v as f64 / 100.0);
                 }
             }
+            44 => {
+                // pool_length (uint16, scale 100, metres) — pool swims only.
+                if let Some(v) = read_u16(data, be) {
+                    s.pool_length = Some(v as f64 / 100.0);
+                }
+            }
             _ => {}
         }
     }
@@ -517,6 +523,7 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
     let mut sessions = Vec::new();
     let mut devices = Vec::new();
     let mut laps = Vec::new();
+    let mut lengths: Vec<LengthInterval> = Vec::new();
     let mut current_app_for_idx: BTreeMap<u8, String> = BTreeMap::new();
     let mut dev_field_owners: BTreeMap<String, String> = BTreeMap::new();
 
@@ -632,6 +639,11 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                     profile::MESG_LAP => {
                         if let Some(l) = decode_lap(def, field_bytes) {
                             laps.push(l);
+                        }
+                    }
+                    profile::MESG_LENGTH => {
+                        if let Some(l) = decode_length(def, field_bytes) {
+                            lengths.push(l);
                         }
                     }
                     profile::MESG_DEVELOPER_DATA_ID => {
@@ -875,6 +887,7 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
     }
 
     laps.sort_by_key(|l| l.start_time_us);
+    lengths.sort_by_key(|l| l.start_time_us);
 
     Ok(ParseResult {
         file_type,
@@ -885,6 +898,7 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
         devices,
         developer_sensors,
         laps,
+        lengths,
     })
 }
 
@@ -1034,7 +1048,7 @@ pub fn parse_course(data: &[u8]) -> Result<CourseResult, String> {
                             // type (enum)
                             if let Some(v) = read_u8_valid(fdata) {
                                 pt.point_type = Some(
-                                    profile::course_point_type_name(v).to_string()
+                                    profile::course_point_name(v).to_string()
                                 );
                             }
                         }
@@ -1248,6 +1262,65 @@ fn decode_lap(def: &MessageDef, field_bytes: &[u8]) -> Option<LapBoundary> {
         }),
         _ => None,
     }
+}
+
+/// Decode a Length message (mesg 101) into a [`LengthInterval`].
+///
+/// Returns `None` when the message has no `start_time` (field 2) — without it a
+/// length cannot be placed on the timeline. A length with an unreadable
+/// `length_type` defaults to idle (contributes no reconstructed distance), which
+/// is the conservative choice: never fabricate distance from an ambiguous length.
+fn decode_length(def: &MessageDef, field_bytes: &[u8]) -> Option<LengthInterval> {
+    let be = def.big_endian;
+    let mut start_time_us: Option<i64> = None;
+    let mut duration_s = 0.0;
+    let mut active = false;
+    let mut cadence: Option<i16> = None;
+    let mut swim_stroke: Option<String> = None;
+
+    for (num, data) in FieldIter::new(def, field_bytes) {
+        match num {
+            2 => {
+                // start_time
+                if let Some(ts) = read_u32(data, be) {
+                    start_time_us = Some((ts as i64 + profile::FIT_EPOCH_OFFSET) * 1_000_000);
+                }
+            }
+            3 => {
+                // total_elapsed_time (uint32, scale 1000, seconds)
+                if let Some(v) = read_u32(data, be) {
+                    duration_s = v as f64 / 1000.0;
+                }
+            }
+            7 => {
+                // swim_stroke (enum)
+                if let Some(v) = read_u8_valid(data) {
+                    swim_stroke = Some(profile::swim_stroke_name(v).to_string());
+                }
+            }
+            9 => {
+                // avg_swimming_cadence (uint8, strokes/min)
+                if let Some(v) = read_u8_valid(data) {
+                    cadence = Some(v as i16);
+                }
+            }
+            12 => {
+                // length_type (enum): 1 = active (with strokes), 0 = idle (rest)
+                if let Some(v) = read_u8_valid(data) {
+                    active = profile::length_type_name(v) == "active";
+                }
+            }
+            _ => {}
+        }
+    }
+
+    start_time_us.map(|start_time_us| LengthInterval {
+        start_time_us,
+        duration_s,
+        active,
+        cadence,
+        swim_stroke,
+    })
 }
 
 /// Extended FieldDescription decoder for full parse — also tracks

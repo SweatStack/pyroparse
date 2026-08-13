@@ -28,6 +28,19 @@ class Device:
 
 @dataclass
 class ActivityMetadata:
+    """Typed activity metadata parsed from FIT Session/DeviceInfo messages.
+
+    The ``extra`` dict carries format- or sport-specific fields without a
+    dedicated attribute:
+
+    - ``sub_sport`` — FIT sub-sport, e.g. ``"lap_swimming"``.
+    - ``pool_length`` — pool length in metres (pool swims only).
+    - ``reconstructed_columns`` — record columns whose values were reconstructed
+      from Length messages rather than measured (pool swims only), e.g.
+      ``["distance", "speed", "cadence"]``. See the Swimming section of the
+      README.
+    """
+
     sport: str | None = None
     name: str | None = None
     start_time: datetime | None = None
@@ -216,6 +229,14 @@ def _build_metadata(raw: dict) -> ActivityMetadata:
     extra: dict = {}
     if sub_sport_raw:
         extra["sub_sport"] = sub_sport_raw
+    # Pool swimming: expose the pool length and flag which record columns were
+    # reconstructed from Length messages rather than measured (see plans/029).
+    pool_length = raw.get("pool_length")
+    if pool_length is not None:
+        extra["pool_length"] = pool_length
+    reconstructed = raw.get("reconstructed_columns")
+    if reconstructed:
+        extra["reconstructed_columns"] = list(reconstructed)
 
     return ActivityMetadata(
         sport=_decode_sport(sport_raw, sub_sport_raw),

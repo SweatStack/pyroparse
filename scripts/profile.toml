@@ -18,9 +18,12 @@ include = [
     "activity",
     "session",
     "lap",
+    "length",
     "record",
     "event",
     "device_info",
+    "course",
+    "course_point",
     "developer_data_id",
     "field_description",
 ]
@@ -39,6 +42,7 @@ include = [
     "event",
     "event_type",
     "lap_trigger",
+    "length_type",
     "session_trigger",
     "activity",
     "file",
@@ -49,4 +53,5 @@ include = [
     "left_right_balance",
     "left_right_balance_100",
     "fit_base_type",
+    "course_point",
 ]

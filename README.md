@@ -125,7 +125,7 @@ FIT files are a mess. `enhanced_speed` vs `speed`, semicircle-encoded GPS, manuf
 | `timestamp` | `Timestamp(us, UTC)` | Microsecond, timezone-aware, always present |
 | `heart_rate` | `Int16` | BPM |
 | `power` | `Int16` | Watts |
-| `cadence` | `Int16` | RPM (cycling) or SPM (running) |
+| `cadence` | `Int16` | RPM (cycling), SPM (running), or strokes/min (swimming) |
 | `speed` | `Float32` | m/s, normalized from `enhanced_speed` variants |
 | `latitude` | `Float64` | Degrees, converted from semicircles |
 | `longitude` | `Float64` | Degrees, converted from semicircles |
@@ -134,7 +134,10 @@ FIT files are a mess. `enhanced_speed` vs `speed`, semicircle-encoded GPS, manuf
 | `distance` | `Float64` | Cumulative meters |
 | `lap` | `Int16` | 0-based lap index, from FIT Lap messages |
 
-These 11 columns are the default output. Use `columns="all"` to get additional columns like `core_temperature`, `smo2`, `form_power`, and `stance_time` from CIQ apps and running dynamics.
+These 11 columns are the default output. Use `columns="all"` to get additional columns like `core_temperature`, `smo2`, `form_power`, and `stance_time` from CIQ apps and running dynamics, plus `length` and `swim_stroke` for pool swims (see [Swimming](#swimming)).
+
+> [!NOTE]
+> For pool swims, `distance`, `speed`, and `cadence` are **reconstructed** from FIT Length messages rather than measured — the underwater Record stream carries only heart rate. They reconcile exactly with the file's totals but are per-length constants, not per-second measurements. See [Swimming](#swimming).
 
 These types are native across the ecosystem, no casting, no surprises:
 
@@ -175,6 +178,49 @@ Files without Lap messages get `lap=0` for all rows. `lap_trigger` is omitted en
 
 ---
 
+## Swimming
+
+Pool ("lap") swimming is special: underwater there is no GPS or speed sensor, so the FIT Record stream carries **only heart rate**. The movement data lives in per-pool-length *Length* messages. Pyroparse reconstructs the missing `distance`, `speed`, and `cadence` columns from those lengths, so a pool swim behaves like any other activity:
+
+```python
+import polars as pl
+import pyroparse as pp
+
+activity = pp.Activity.load_fit("pool-swim.fit")
+df = pl.from_arrow(activity.data)
+
+df["distance"].max()            # 1500.0 — reconstructed, reconciles with the session total
+df.group_by("lap").agg(pl.col("distance").max())   # per-interval distance, no special API
+```
+
+`distance` is cumulative and monotonic; `speed` and `cadence` are the per-length averages (constant within a length, null while resting). Because these are **reconstructed** rather than measured, pyroparse says so — and exposes the pool length:
+
+```python
+activity.metadata.extra["pool_length"]            # 25.0 (metres)
+activity.metadata.extra["reconstructed_columns"]  # ["distance", "speed", "cadence"]
+```
+
+Two opt-in extra columns describe the pool-length structure (via `columns="all"` or `extra_columns=[...]`):
+
+| Column | Arrow Type | Notes |
+|--------|-----------|-------|
+| `length` | `Int16` | 0-based pool-length index — the swim analogue of `lap` |
+| `swim_stroke` | `Utf8` | FIT stroke name: `freestyle`, `backstroke`, `breaststroke`, `butterfly`, `drill`, `mixed`, `im`, … (null on rest lengths) |
+
+```python
+activity = pp.Activity.load_fit("pool-swim.fit", extra_columns=["length", "swim_stroke"])
+df = pl.from_arrow(activity.data)
+
+# Pace per 100 m for each length
+df.group_by("length").agg(pl.col("speed").first())
+# Isolate the butterfly lengths
+df.filter(pl.col("swim_stroke") == "butterfly")
+```
+
+Open-water swims carry GPS, distance, and speed in the Record stream like any outdoor activity, so nothing is reconstructed and neither `length` nor `swim_stroke` appears. The same is true of pool swims recorded without lap-swim mode. Reconstruction activates *only* when a file contains Length messages, and it never overwrites a measured value.
+
+---
+
 ## Structured metadata
 
 Metadata is extracted from FIT Session and DeviceInfo messages, the same source Garmin Connect and Strava use. Sport, timestamps, duration, distance, device info, available metrics: all parsed into a typed dataclass, not left as raw dicts for you to dig through.
@@ -192,6 +238,8 @@ class ActivityMetadata:
     devices: list[Device]           # head unit + connected sensors
     extra: dict                     # sub_sport, anything format-specific
 ```
+
+The `extra` dict holds format- or sport-specific fields that don't earn a top-level attribute: `sub_sport` (e.g. `"lap_swimming"`), and — for pool swims — `pool_length` (metres) and `reconstructed_columns` (which record columns were derived from Length messages rather than measured; see [Swimming](#swimming)).
 
 Manual overrides merge on top of file-native values. A `sport` override is
 validated against the taxonomy, so a typo fails loudly instead of silently

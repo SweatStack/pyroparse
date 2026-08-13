@@ -9,11 +9,16 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class TestScanFit:
+    # Single-session activity fixtures scan_fit reports one row each: test.fit,
+    # with-developer-fields.fit, swimming-pool.fit, swimming-pool-50m.fit,
+    # swimming-open-water.fit. course.fit and the multi-session file are skipped.
+    N_ACTIVITY_FIXTURES = 5
+
     def test_scan_fit_table_structure_and_values(self):
         """scan_fit returns correct table with expected columns, rows, and values."""
         result = pp.scan_fit(str(FIXTURES))
         assert isinstance(result, pa.Table)
-        assert result.num_rows == 2
+        assert result.num_rows == self.N_ACTIVITY_FIXTURES
         expected = [
             "file_path", "sport", "name", "start_time", "start_time_local",
             "duration", "distance", "metrics", "device_name", "device_type",
@@ -26,7 +31,7 @@ class TestScanFit:
 
     def test_non_recursive(self):
         result = pp.scan_fit(str(FIXTURES), recursive=False)
-        assert result.num_rows == 2
+        assert result.num_rows == self.N_ACTIVITY_FIXTURES
 
     def test_empty_directory(self, tmp_path):
         result = pp.scan_fit(str(tmp_path))

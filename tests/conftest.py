@@ -39,6 +39,20 @@ def multi_session_path():
     return path
 
 
+@pytest.fixture
+def pool_swim_path():
+    path = FIXTURES / "swimming-pool.fit"
+    assert path.exists(), f"Test fixture not found: {path}"
+    return path
+
+
+@pytest.fixture
+def open_water_path():
+    path = FIXTURES / "swimming-open-water.fit"
+    assert path.exists(), f"Test fixture not found: {path}"
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Session-scoped parsed fixtures (each file parsed once per test session)
 # ---------------------------------------------------------------------------
@@ -83,3 +97,27 @@ def multi_session():
 def multi_session_all():
     """cycling-rowing-cycling-rowing.fit — 4 sessions, all columns."""
     return Session.load_fit(FIXTURES / "cycling-rowing-cycling-rowing.fit", columns="all")
+
+
+@pytest.fixture(scope="session")
+def pool_swim():
+    """swimming-pool.fit — 25 m short-course lap swim, default columns."""
+    return Activity.load_fit(FIXTURES / "swimming-pool.fit")
+
+
+@pytest.fixture(scope="session")
+def pool_swim_all():
+    """swimming-pool.fit — 25 m short-course lap swim, all columns."""
+    return Activity.load_fit(FIXTURES / "swimming-pool.fit", columns="all")
+
+
+@pytest.fixture(scope="session")
+def pool_swim_50m():
+    """swimming-pool-50m.fit — 50 m long-course lap swim, all columns."""
+    return Activity.load_fit(FIXTURES / "swimming-pool-50m.fit", columns="all")
+
+
+@pytest.fixture(scope="session")
+def open_water_swim():
+    """swimming-open-water.fit — open-water swim with no Length messages."""
+    return Activity.load_fit(FIXTURES / "swimming-open-water.fit", columns="all")
