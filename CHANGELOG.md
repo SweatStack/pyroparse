@@ -16,7 +16,7 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
-## [Unreleased]
+## [0.7.0] - 2026-08-21
 
 ### Added
 - **`deduplicate` parameter** (default `True`) on all FIT loaders (`read_fit`, `Activity.load_fit`/`open_fit`, `Session.load_fit`/`open_fit`). Records sharing a `timestamp` are collapsed to a single row (keeping the last), yielding a unique, index-ready series that absorbs device backward-corrections. Pass `deduplicate=False` to keep every row for sub-second-sampled files (e.g. a 10 Hz sensor), where collapsing would discard real data.
