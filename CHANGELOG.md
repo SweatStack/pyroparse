@@ -16,6 +16,20 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
+## [Unreleased]
+
+### Fixed
+- **Multi-session record assignment.** Records are assigned to sessions by `start_time` (FIT field 2) instead of the session end `timestamp` (field 253), which some devices pin to a constant. Multi-session files with rapid session alternation previously lost almost all record data (a valid 9-session file returned 1 of 1906 records); all records are now retained and partitioned exactly across sessions.
+- **Session `duration`.** `ActivityMetadata.duration` now reports `total_elapsed_time` (FIT field 7, wall-clock) instead of `total_timer_time` (field 8) — the two fields were transposed in the session decoder.
+- **Lap decoding robustness.** Laps are decoded from `start_time` alone and no longer dropped when a device omits the unreliable lap end `timestamp` (field 253).
+
+### Changed
+- **Behavior change (persisted values).** Multi-session per-activity row counts now sum exactly to the record total (boundary records were previously double-counted into two sessions), and `duration` reports elapsed (wall-clock) rather than timer (moving) time. Consumers persisting these values should expect small shifts on affected files.
+
+### Documentation
+- Documented the canonical column and developer-field mapping contract (`power`/`cadence` including Stryd, `smo2`, `core_temperature`, `enhanced_respiration_rate` in breaths/min).
+
+
 ## [0.6.0] - 2026-08-13
 
 ### Added

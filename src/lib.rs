@@ -272,7 +272,6 @@ pub(crate) struct SessionMeta {
     /// Anchors per-record distance reconstruction — see [`assign_lengths`].
     pub(crate) pool_length: Option<f64>,
     pub(crate) start_timestamp_us: Option<i64>,
-    pub(crate) end_timestamp_us: Option<i64>,
 }
 
 #[derive(Clone, Default)]
@@ -1128,26 +1127,36 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
         let device_groups =
             split_devices_per_session(&parsed.devices, parsed.sessions.len());
 
+        // Assign records to sessions by carry-forward on `start_time` (field 2),
+        // NOT the session `timestamp`/end field (253): some devices pin field 253
+        // to a constant, which collapses the old time-window slicing (see plan 031
+        // and docs/FIT-FORMAT.md). FIT sessions are sequential and non-overlapping,
+        // and records are ascending by timestamp, so each session owns the
+        // contiguous range [start_i, start_{i+1}); session 0 also captures any
+        // pre-roll. A missing start_time maps to i64::MAX so that session stays
+        // empty rather than greedily capturing earlier records.
+        let n_sessions = parsed.sessions.len();
+        let starts: Vec<i64> = parsed
+            .sessions
+            .iter()
+            .map(|s| s.start_timestamp_us.unwrap_or(i64::MAX))
+            .collect();
+
         for (si, session) in parsed.sessions.iter().enumerate() {
-            let start = session.start_timestamp_us.unwrap_or(i64::MIN);
-            let end = session.end_timestamp_us.unwrap_or(i64::MAX);
+            let window_start = if si == 0 { i64::MIN } else { starts[si] };
+            let window_end = if si + 1 == n_sessions { i64::MAX } else { starts[si + 1] };
             let first = parsed
                 .records
-                .iter()
-                .position(|r| r.timestamp.unwrap_or(0) >= start)
-                .unwrap_or(parsed.records.len());
+                .partition_point(|r| r.timestamp.unwrap_or(0) < window_start);
             let last = parsed
                 .records
-                .iter()
-                .rposition(|r| r.timestamp.unwrap_or(0) <= end)
-                .map(|i| i + 1)
-                .unwrap_or(first);
+                .partition_point(|r| r.timestamp.unwrap_or(0) < window_end);
             let len = last.saturating_sub(first);
 
-            // Filter laps to this session's time range and re-index from 0.
+            // Filter laps to this session's window and re-index from 0.
             let session_laps: Vec<LapBoundary> = parsed.laps
                 .iter()
-                .filter(|l| l.start_time_us >= start && l.start_time_us <= end)
+                .filter(|l| l.start_time_us >= window_start && l.start_time_us < window_end)
                 .map(|l| LapBoundary {
                     start_time_us: l.start_time_us,
                     end_time_us: l.end_time_us,
@@ -1155,10 +1164,10 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
                 })
                 .collect();
 
-            // Filter Length intervals to this session and re-index from 0.
+            // Filter Length intervals to this session's window and re-index from 0.
             let session_lengths: Vec<LengthInterval> = parsed.lengths
                 .iter()
-                .filter(|l| l.start_time_us >= start && l.start_time_us <= end)
+                .filter(|l| l.start_time_us >= window_start && l.start_time_us < window_end)
                 .cloned()
                 .collect();
 

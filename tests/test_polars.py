@@ -16,7 +16,9 @@ class TestScanFit:
 
     def test_row_count(self):
         result = ppl.scan_fit(str(FIXTURES))
-        assert len(result) == 2
+        # One row per single-activity fixture; course.fit and the multi-session
+        # files are skipped. Kept in sync with test_batch.N_ACTIVITY_FIXTURES.
+        assert len(result) == 7
 
     def test_has_sport_column(self):
         result = ppl.scan_fit(str(FIXTURES))

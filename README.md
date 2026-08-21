@@ -139,6 +139,18 @@ These 11 columns are the default output. Use `columns="all"` to get additional c
 > [!NOTE]
 > For pool swims, `distance`, `speed`, and `cadence` are **reconstructed** from FIT Length messages rather than measured — the underwater Record stream carries only heart rate. `distance` is interpolated per record and reconciles exactly with the session total; `speed` and `cadence` are per-length averages held constant across each length, not true per-second signals. See [Swimming](#swimming).
 
+### Canonical columns and developer-field mappings
+
+Manufacturer and Connect IQ developer fields are folded into canonical columns as a supported contract, so you don't have to special-case per-device naming:
+
+| Canonical column | Folded sources | Availability |
+|---|---|---|
+| `power` | native `power`; Stryd developer field `Power` | standard column |
+| `cadence` | native `cadence`; Stryd developer field `Cadence` | standard column |
+| `smo2` | `saturated_hemoglobin_percent`, `SmO2`, `Current Saturated Hemoglobin Percent` | `columns="all"` |
+| `core_temperature` | `core_temperature`, `Core Body Temperature` | `columns="all"` |
+| `enhanced_respiration_rate` | native `enhanced_respiration_rate`, already scaled to **breaths/min** | `columns="all"` |
+
 These types are native across the ecosystem, no casting, no surprises:
 
 ```python

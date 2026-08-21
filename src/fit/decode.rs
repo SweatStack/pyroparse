@@ -282,20 +282,14 @@ fn decode_session(def: &MessageDef, field_bytes: &[u8]) -> SessionMeta {
                     s.start_timestamp_us = Some(unix * 1_000_000);
                 }
             }
-            253 => {
-                // timestamp (uint32, date_time) — session end time
-                if let Some(ts) = read_u32(data, be) {
-                    s.end_timestamp_us = Some((ts as i64 + profile::FIT_EPOCH_OFFSET) * 1_000_000);
-                }
-            }
-            7 if s.duration.is_none() => {
-                // total_timer_time — fallback if total_elapsed_time not present
+            7 => {
+                // total_elapsed_time (field 7) — preferred (wall-clock, incl. pauses)
                 if let Some(v) = read_u32(data, be) {
                     s.duration = Some(v as f64 / 1000.0);
                 }
             }
-            8 => {
-                // total_elapsed_time — preferred (overrides total_timer_time)
+            8 if s.duration.is_none() => {
+                // total_timer_time (field 8) — fallback only if elapsed absent
                 if let Some(v) = read_u32(data, be) {
                     s.duration = Some(v as f64 / 1000.0);
                 }
@@ -1254,14 +1248,15 @@ fn decode_lap(def: &MessageDef, field_bytes: &[u8]) -> Option<LapBoundary> {
         }
     }
 
-    match (start_time_us, end_time_us) {
-        (Some(start), Some(end)) => Some(LapBoundary {
-            start_time_us: start,
-            end_time_us: end,
-            trigger,
-        }),
-        _ => None,
-    }
+    // Require only `start_time` (field 2). The lap `timestamp`/end field (253) is
+    // device-unreliable (some devices omit or pin it) and `end_time_us` is not used
+    // for record→lap assignment (that keys off `start_time`), so default it to the
+    // start rather than dropping the whole lap. Mirrors `decode_length` below.
+    start_time_us.map(|start| LapBoundary {
+        start_time_us: start,
+        end_time_us: end_time_us.unwrap_or(start),
+        trigger,
+    })
 }
 
 /// Decode a Length message (mesg 101) into a [`LengthInterval`].

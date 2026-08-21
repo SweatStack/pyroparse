@@ -11,8 +11,11 @@ FIXTURES = Path(__file__).parent / "fixtures"
 class TestScanFit:
     # Single-session activity fixtures scan_fit reports one row each: test.fit,
     # with-developer-fields.fit, swimming-pool.fit, swimming-pool-50m.fit,
-    # swimming-open-water.fit. course.fit and the multi-session file are skipped.
-    N_ACTIVITY_FIXTURES = 5
+    # swimming-open-water.fit, running-stryd-devfields.fit,
+    # cycling-core-temperature.fit. course.fit and the multi-session files
+    # (cycling-rowing-cycling-rowing.fit, cycling-running-rapid-9session.fit) are
+    # skipped.
+    N_ACTIVITY_FIXTURES = 7
 
     def test_scan_fit_table_structure_and_values(self):
         """scan_fit returns correct table with expected columns, rows, and values."""

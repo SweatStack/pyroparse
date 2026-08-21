@@ -17,6 +17,7 @@ FIXTURE_FILES = [
     ("test.fit", 1),
     ("with-developer-fields.fit", 1),
     ("cycling-rowing-cycling-rowing.fit", 4),
+    ("cycling-running-rapid-9session.fit", 9),
 ]
 
 
