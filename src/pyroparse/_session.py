@@ -12,6 +12,7 @@ from pyroparse._activity import (
 from pyroparse._core import parse_fit_metadata as _parse_fit_metadata
 from pyroparse._errors import FileTypeMismatchError
 from pyroparse._metadata import ActivityMetadata, _build_metadata
+from pyroparse._rows import finalize_rows
 from pyroparse._schema import select_columns
 
 
@@ -35,11 +36,13 @@ class Session:
         columns: list[str] | str | None = None,
         extra_columns: list[str] | None = None,
         missing: str = "raise",
+        deduplicate: bool = True,
     ) -> Session:
         pairs = _parse_multi(source)
         activities: list[Activity] = []
         for data, meta in pairs:
             data = select_columns(data, columns, extra_columns, missing)
+            data = finalize_rows(data, deduplicate=deduplicate)
             _filter_device_columns(meta, data)
             activities.append(Activity(data, meta))
         return cls(activities)
@@ -52,6 +55,7 @@ class Session:
         columns: list[str] | str | None = None,
         extra_columns: list[str] | None = None,
         missing: str = "raise",
+        deduplicate: bool = True,
     ) -> Session:
         """Load metadata now, defer record data until ``.data`` is accessed."""
         resolved = str(os.fspath(path))
@@ -70,6 +74,7 @@ class Session:
                     for i, (data, _) in enumerate(_parse_multi(resolved)):
                         cache[i] = data
                 data = select_columns(cache.pop(idx), columns, extra_columns, missing)
+                data = finalize_rows(data, deduplicate=deduplicate)
                 _filter_device_columns(meta, data)
                 return data
             return loader

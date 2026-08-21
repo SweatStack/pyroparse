@@ -10,6 +10,7 @@ from pyroparse._core import parse_fit_bytes as _parse_fit_bytes
 from pyroparse._core import parse_fit_metadata as _parse_fit_metadata
 from pyroparse._errors import FileTypeMismatchError, MultipleActivitiesError
 from pyroparse._metadata import ActivityMetadata, _build_metadata, _merge_metadata
+from pyroparse._rows import finalize_rows
 from pyroparse._schema import select_columns
 from pyroparse._types import PathSource, Source
 
@@ -99,6 +100,7 @@ class Activity:
         columns: list[str] | str | None = None,
         extra_columns: list[str] | None = None,
         missing: str = "raise",
+        deduplicate: bool = True,
         metadata: dict | None = None,
     ) -> Activity:
         # Build a Rust-side column hint to skip decoding unwanted fields.
@@ -117,6 +119,7 @@ class Activity:
         file_meta = _build_metadata(raw_activity["metadata"])
         meta = _merge_metadata(file_meta, metadata)
         data = select_columns(data, columns, extra_columns, missing)
+        data = finalize_rows(data, deduplicate=deduplicate)
         _filter_device_columns(meta, data)
         return cls(data, meta)
 
@@ -166,6 +169,7 @@ class Activity:
         columns: list[str] | str | None = None,
         extra_columns: list[str] | None = None,
         missing: str = "raise",
+        deduplicate: bool = True,
         metadata: dict | None = None,
     ) -> Activity:
         """Load metadata now, defer record data until ``.data`` is accessed.
@@ -189,6 +193,7 @@ class Activity:
         def loader() -> pa.Table:
             data, _ = _parse_single(resolved)
             data = select_columns(data, columns, extra_columns, missing)
+            data = finalize_rows(data, deduplicate=deduplicate)
             _filter_device_columns(file_meta, data)
             return data
 

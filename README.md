@@ -151,6 +151,17 @@ Manufacturer and Connect IQ developer fields are folded into canonical columns a
 | `core_temperature` | `core_temperature`, `Core Body Temperature` | `columns="all"` |
 | `enhanced_respiration_rate` | native `enhanced_respiration_rate`, already scaled to **breaths/min** | `columns="all"` |
 
+### Sorted, de-duplicated by default
+
+Every FIT load returns records **sorted by `timestamp`**. By default records that share a timestamp are collapsed to one row (`deduplicate=True`, keeping the last), giving a unique, index-ready series that absorbs device backward-corrections:
+
+```python
+pp.read_fit("ride.fit")                      # sorted + deduplicated (default)
+pp.read_fit("ride.fit", deduplicate=False)   # keep every row (still sorted)
+```
+
+Pass `deduplicate=False` for **sub-second-sampled** files — e.g. a 10 Hz sensor writing several records under one 1-second FIT timestamp — where collapsing to one row per second would discard real data.
+
 These types are native across the ecosystem, no casting, no surprises:
 
 ```python

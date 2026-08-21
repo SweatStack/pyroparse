@@ -12,10 +12,10 @@ class TestScanFit:
     # Single-session activity fixtures scan_fit reports one row each: test.fit,
     # with-developer-fields.fit, swimming-pool.fit, swimming-pool-50m.fit,
     # swimming-open-water.fit, running-stryd-devfields.fit,
-    # cycling-core-temperature.fit. course.fit and the multi-session files
-    # (cycling-rowing-cycling-rowing.fit, cycling-running-rapid-9session.fit) are
-    # skipped.
-    N_ACTIVITY_FIXTURES = 7
+    # cycling-core-temperature.fit, non-unique-timestamps.fit, subsecond-10hz.fit.
+    # course.fit and the multi-session files (cycling-rowing-cycling-rowing.fit,
+    # cycling-running-rapid-9session.fit) are skipped.
+    N_ACTIVITY_FIXTURES = 9
 
     def test_scan_fit_table_structure_and_values(self):
         """scan_fit returns correct table with expected columns, rows, and values."""

@@ -49,10 +49,22 @@ def read_fit(
     columns: list[str] | str | None = None,
     extra_columns: list[str] | None = None,
     missing: str = "raise",
+    deduplicate: bool = True,
 ) -> pa.Table:
-    """Read a FIT file and return the record data as a PyArrow Table."""
+    """Read a FIT file and return the record data as a PyArrow Table.
+
+    The table is always sorted by ``timestamp``. With ``deduplicate=True`` (the
+    default) records sharing a ``timestamp`` are collapsed to one row (keeping the
+    last), giving a unique, index-ready series. Pass ``deduplicate=False`` for
+    sub-second-sampled files (e.g. a 10 Hz sensor writing several records per
+    second) where dropping the extra rows would discard real data.
+    """
     return Activity.load_fit(
-        source, columns=columns, extra_columns=extra_columns, missing=missing,
+        source,
+        columns=columns,
+        extra_columns=extra_columns,
+        missing=missing,
+        deduplicate=deduplicate,
     ).data
 
 

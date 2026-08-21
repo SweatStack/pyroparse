@@ -18,12 +18,16 @@ Types of changes:
 
 ## [Unreleased]
 
+### Added
+- **`deduplicate` parameter** (default `True`) on all FIT loaders (`read_fit`, `Activity.load_fit`/`open_fit`, `Session.load_fit`/`open_fit`). Records sharing a `timestamp` are collapsed to a single row (keeping the last), yielding a unique, index-ready series that absorbs device backward-corrections. Pass `deduplicate=False` to keep every row for sub-second-sampled files (e.g. a 10 Hz sensor), where collapsing would discard real data.
+
 ### Fixed
 - **Multi-session record assignment.** Records are assigned to sessions by `start_time` (FIT field 2) instead of the session end `timestamp` (field 253), which some devices pin to a constant. Multi-session files with rapid session alternation previously lost almost all record data (a valid 9-session file returned 1 of 1906 records); all records are now retained and partitioned exactly across sessions.
 - **Session `duration`.** `ActivityMetadata.duration` now reports `total_elapsed_time` (FIT field 7, wall-clock) instead of `total_timer_time` (field 8) — the two fields were transposed in the session decoder.
 - **Lap decoding robustness.** Laps are decoded from `start_time` alone and no longer dropped when a device omits the unreliable lap end `timestamp` (field 253).
 
 ### Changed
+- **Records are now sorted by `timestamp`** on every FIT load (a stable sort, ties keep file order) and **deduplicated by default** (see Added). Already-clean 1 Hz files are unchanged; files with duplicate timestamps or out-of-order backward-corrections change under the default unless `deduplicate=False` is passed.
 - **Behavior change (persisted values).** Multi-session per-activity row counts now sum exactly to the record total (boundary records were previously double-counted into two sessions), and `duration` reports elapsed (wall-clock) rather than timer (moving) time. Consumers persisting these values should expect small shifts on affected files.
 
 ### Documentation

@@ -1,5 +1,7 @@
 # Developing Pyroparse
 
+> Design principles and API conventions live in [AGENTS.md](AGENTS.md).
+
 ## Prerequisites
 
 - Python ≥ 3.10
