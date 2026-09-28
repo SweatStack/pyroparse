@@ -16,7 +16,7 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
-## [Unreleased]
+## [0.9.0] - 2026-09-28
 
 ### Changed
 - **`enhanced_respiration_rate` is now the canonical `respiration_rate` column** (`Float32`, breaths/min), in line with `enhanced_speed` → `speed` and `enhanced_altitude` → `altitude`. It folds the legacy whole-number `respiration_rate` field too, preferring the enhanced one. **Breaking:** select `respiration_rate` instead of `enhanced_respiration_rate`.
