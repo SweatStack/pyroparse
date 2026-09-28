@@ -149,7 +149,9 @@ Manufacturer and Connect IQ developer fields are folded into canonical columns a
 | `cadence` | native `cadence`; Stryd developer field `Cadence` | standard column |
 | `smo2` | `saturated_hemoglobin_percent`, `SmO2`, `Current Saturated Hemoglobin Percent` | `columns="all"` |
 | `core_temperature` | `core_temperature`, `Core Body Temperature` | `columns="all"` |
-| `enhanced_respiration_rate` | native `enhanced_respiration_rate`, already scaled to **breaths/min** | `columns="all"` |
+| `respiration_rate` | native `enhanced_respiration_rate` (hundredths) or legacy `respiration_rate` (whole numbers), in **breaths/min**, `Float32` | `columns="all"` |
+
+Other native fields keep their FIT profile names as extra columns. A field the profile scales (e.g. `stance_time`, `fractional_cadence`, `left_pedal_smoothness`) is a `Float64` holding the decoded value; an unscaled one keeps its integer type.
 
 ### Sorted, de-duplicated by default
 
@@ -397,6 +399,8 @@ session.activities[2].metadata.sport  # "running"
 ```
 
 `Activity.load_fit()` raises `MultipleActivitiesError` for multi-activity files, no silent data loss.
+
+Each activity's `distance` starts at its own session boundary. Some devices keep one running distance across all sessions of a file; pyroparse subtracts the distance carried in from the previous sessions, so every activity's `distance` counts from zero and reconciles with its session total. Files whose device already restarts distance per session are left as recorded.
 
 ---
 

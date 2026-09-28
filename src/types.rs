@@ -237,6 +237,16 @@ fn apply_scale_f64(raw: f64, scale: f64, offset: f64) -> f64 {
     if scale == 1.0 && offset == 0.0 { raw } else { raw / scale - offset }
 }
 
+/// Arrow type for a profile-defined field: the base type's own type, except
+/// that a numeric field with a scale or offset becomes `Float64`. Its decoded
+/// value, `raw / scale - offset`, is fractional; an integer column would
+/// truncate it (`fractional_cadence` = raw / 128 would always read 0).
+pub fn field_arrow_type(base_type: u8, scale: f64, offset: f64) -> Option<DataType> {
+    let dtype = base_type_to_arrow(base_type)?;
+    let scaled = scale != 1.0 || offset != 0.0;
+    Some(if scaled && dtype != DataType::Utf8 { DataType::Float64 } else { dtype })
+}
+
 /// Map a FIT base type to an Arrow DataType for extra column discovery.
 pub fn base_type_to_arrow(base_type: u8) -> Option<DataType> {
     match BaseType::from_byte(base_type) {
@@ -297,6 +307,34 @@ mod tests {
     fn utf8_with_anything_is_utf8() {
         assert_eq!(promote_type(&DataType::Utf8, &DataType::Int16), DataType::Utf8);
         assert_eq!(promote_type(&DataType::Float32, &DataType::Utf8), DataType::Utf8);
+    }
+
+    // ── Field types ──────────────────────────────────────────────────────
+
+    #[test]
+    fn unscaled_field_keeps_its_base_type() {
+        assert_eq!(field_arrow_type(0x84, 1.0, 0.0), Some(DataType::Int32)); // uint16
+        assert_eq!(field_arrow_type(0x07, 1.0, 0.0), Some(DataType::Utf8));
+    }
+
+    #[test]
+    fn scaled_or_offset_field_is_float64() {
+        assert_eq!(field_arrow_type(0x84, 100.0, 0.0), Some(DataType::Float64)); // uint16 / 100
+        assert_eq!(field_arrow_type(0x02, 128.0, 0.0), Some(DataType::Float64)); // uint8 / 128
+        assert_eq!(field_arrow_type(0x86, 1.0, 500.0), Some(DataType::Float64)); // offset only
+    }
+
+    #[test]
+    fn scaled_field_decodes_without_truncation() {
+        let mut col = TypedColumn::new(&field_arrow_type(0x84, 100.0, 0.0).unwrap(), 1);
+        col.set_from_bytes(0, &2616u16.to_le_bytes(), 0x84, false, 100.0, 0.0);
+        let TypedColumn::F64(v) = col else { panic!("expected a Float64 column") };
+        assert_eq!(v[0], Some(26.16));
+    }
+
+    #[test]
+    fn opaque_bytes_have_no_type() {
+        assert_eq!(field_arrow_type(0x0D, 100.0, 0.0), None);
     }
 
     #[test]

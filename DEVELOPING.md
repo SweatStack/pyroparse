@@ -20,6 +20,8 @@ uv run maturin develop
 
 This compiles the Rust extension in debug mode and installs it into the venv.
 
+> **macOS 27:** if importing fails with `mis-aligned LINKEDIT string pool`, the extension was stripped by rustc's bundled `rust-objcopy`. `.cargo/config.toml` turns that stripping off on macOS; rebuild with `maturin develop` if an older build is still installed.
+
 ## Build
 
 ```sh
@@ -156,9 +158,9 @@ Standard columns are hardcoded in both Rust and Python:
 
 ### Adding a canonical extra column
 
-Canonical extras (like `core_temperature`, `smo2`) are included automatically when present but not part of the default column set:
+Canonical extras (like `core_temperature`, `smo2`, `respiration_rate`) are included automatically when present but not part of the default column set:
 
-1. **Rust** (`src/lib.rs`): Add a field to `RecordRow`, handle it in the Record match arm, and include it in `build_batch()` alongside the existing canonical extras
+1. **Rust** (`src/lib.rs`, `src/fit/decode.rs`): Add a field to `RecordRow`, decode it in the Record match arm and `ParseConfig::build_field_mask`, and add it to the `float_extras` list in `build_batch()`
 2. **Rust** (`src/fields.rs`): Add to `is_canonical_column()` and `is_handled_field()`
 3. **Python** (`src/pyroparse/_schema.py`): Add to `_CANONICAL_TYPES`
 

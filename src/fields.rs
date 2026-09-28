@@ -41,6 +41,7 @@ pub fn is_canonical_column(name: &str) -> bool {
             | "lap_trigger"
             | "core_temperature"
             | "smo2"
+            | "respiration_rate"
     )
 }
 
@@ -63,6 +64,8 @@ pub fn is_handled_field(name: &str) -> bool {
             | "enhanced_altitude"
             | "temperature"
             | "distance"
+            | "respiration_rate"
+            | "enhanced_respiration_rate"
             // Developer fields merged into canonical columns
             | "Power"
             | "Cadence"
@@ -117,7 +120,7 @@ mod tests {
         for col in [
             "timestamp", "heart_rate", "power", "cadence", "speed",
             "latitude", "longitude", "altitude", "temperature", "distance",
-            "lap", "lap_trigger", "core_temperature", "smo2",
+            "lap", "lap_trigger", "core_temperature", "smo2", "respiration_rate",
         ] {
             assert!(is_canonical_column(col), "{col} should be canonical");
         }
@@ -136,6 +139,7 @@ mod tests {
             "timestamp", "heart_rate", "power", "cadence", "speed",
             "enhanced_speed", "position_lat", "position_long",
             "altitude", "enhanced_altitude", "temperature", "distance",
+            "respiration_rate", "enhanced_respiration_rate",
         ] {
             assert!(is_handled_field(name), "{name} should be handled");
         }

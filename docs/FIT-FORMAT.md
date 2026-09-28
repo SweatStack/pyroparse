@@ -880,6 +880,14 @@ chained FIT files, each containing one Session message. Alternatively, a
 single FIT section may contain multiple Session messages separated by Lap
 and Event messages.
 
+Record `distance` (field 5) is cumulative, and devices disagree on its scope
+in such files: some restart it for each session, others keep one running
+total across all of them. A per-session reading has to subtract the distance
+carried in from earlier sessions. The last distance before the session's
+`start_time` is that baseline when the session's first distance continues from
+it; a lower first distance means the device restarted (`rebase_session_distance`
+in `src/lib.rs`).
+
 ---
 
 ## 22. Activity file structure

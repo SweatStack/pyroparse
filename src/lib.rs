@@ -259,6 +259,9 @@ pub(crate) struct RecordRow {
     // but emitted as extras (not part of the 10 standard columns).
     pub(crate) core_temperature: Option<f32>,
     pub(crate) smo2: Option<f32>,
+    /// Breaths/min, from `enhanced_respiration_rate` (field 108) or the
+    /// legacy whole-number `respiration_rate` (field 99).
+    pub(crate) respiration_rate: Option<f32>,
     // Developer shadow fields — kept separate from standard fields so
     // we can pick the winner per-session after slicing.
     pub(crate) dev_power: Option<i16>,
@@ -554,6 +557,29 @@ fn assign_lengths(
     LengthColumns { distance, speed, cadence, stroke, index }
 }
 
+/// Re-anchor a later session's cumulative `distance` at zero.
+///
+/// Record `distance` is cumulative. In a multi-session file some devices keep
+/// one running total across sessions while others restart it per session, so a
+/// later session may begin at the previous one's end. `carried` is the last
+/// distance recorded before this session started. When the session's first
+/// distance continues from it (is at least `carried`), the device carried the
+/// total over and `carried` is subtracted; when it is lower, the device reset
+/// and nothing changes. No threshold is involved, and a first sample of a few
+/// metres is kept as the movement it is. Results are rounded to the field's
+/// centimetre resolution, so a rebased value is bit-identical to what a
+/// resetting device would have recorded.
+fn rebase_session_distance(records: &mut [RecordRow], carried: Option<f64>) {
+    let Some(carried) = carried.filter(|&c| c > 0.0) else { return };
+    let Some(first) = records.iter().find_map(|r| r.distance) else { return };
+    if first < carried {
+        return;
+    }
+    for d in records.iter_mut().filter_map(|r| r.distance.as_mut()) {
+        *d = ((*d - carried) * 100.0).round() / 100.0;
+    }
+}
+
 /// Build the Arrow RecordBatch for a set of records.
 ///
 /// Returns the batch and the list of standard columns whose values were
@@ -589,23 +615,21 @@ fn build_batch(
     if reconstruct_speed { reconstructed_columns.push("speed".to_string()); }
     if reconstruct_cadence { reconstructed_columns.push("cadence".to_string()); }
 
-    // Schema: 12 fixed columns, then extras alphabetically.
-    // Canonical extras from RecordRow (core_temperature, smo2) — only include
-    // if they have at least one non-null value, sorted into the extras.
+    // Canonical extras from RecordRow — only included when they have at least
+    // one non-null value, then sorted in among the dynamic extras.
     let mut canonical_extras: Vec<(String, Arc<dyn arrow::array::Array>)> = Vec::new();
-    if records.iter().any(|r| r.core_temperature.is_some()) {
-        canonical_extras.push((
-            "core_temperature".into(),
-            Arc::new(Float32Array::from_iter(
-                records.iter().map(|r| r.core_temperature),
-            )),
-        ));
-    }
-    if records.iter().any(|r| r.smo2.is_some()) {
-        canonical_extras.push((
-            "smo2".into(),
-            Arc::new(Float32Array::from_iter(records.iter().map(|r| r.smo2))),
-        ));
+    let float_extras: [(&str, fn(&RecordRow) -> Option<f32>); 3] = [
+        ("core_temperature", |r| r.core_temperature),
+        ("respiration_rate", |r| r.respiration_rate),
+        ("smo2", |r| r.smo2),
+    ];
+    for (name, value) in float_extras {
+        if records.iter().any(|r| value(r).is_some()) {
+            canonical_extras.push((
+                name.into(),
+                Arc::new(Float32Array::from_iter(records.iter().map(value))),
+            ));
+        }
     }
 
     // Compute lap assignment.
@@ -1267,6 +1291,21 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             .map(|s| s.start_timestamp_us.unwrap_or(i64::MAX))
             .collect();
 
+        // The cumulative distance each session inherits: the last distance
+        // recorded before it starts. Read up front, from unmodified records —
+        // rebasing session i would otherwise change what session i+1 sees.
+        let carried: Vec<Option<f64>> = starts
+            .iter()
+            .enumerate()
+            .map(|(si, &start)| {
+                if si == 0 {
+                    return None;
+                }
+                let first = parsed.records.partition_point(|r| r.timestamp.unwrap_or(0) < start);
+                parsed.records[..first].iter().rev().find_map(|r| r.distance)
+            })
+            .collect();
+
         for (si, session) in parsed.sessions.iter().enumerate() {
             let window_start = if si == 0 { i64::MIN } else { starts[si] };
             let window_end = if si + 1 == n_sessions { i64::MAX } else { starts[si + 1] };
@@ -1299,6 +1338,7 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             // Resolve merge on a mutable slice of this session's records.
             let session_records = &mut parsed.records[first..first + len];
             let dev_won = resolve_merge(session_records);
+            rebase_session_distance(session_records, carried[si]);
 
             // Rebuild fixed columns (+ canonical extras, incl. pool-swim
             // reconstruction) from the now-resolved records.  Dynamic extras come
@@ -1794,6 +1834,61 @@ mod tests {
             assert_eq!(c.distance, vec![Some(0.0), Some(0.0)]);
             assert_eq!(c.speed, vec![None, Some(1.25)]);
             assert_eq!(c.stroke, vec![None, Some("freestyle".into())]);
+        }
+    }
+
+    // ── Per-session distance rebasing ────────────────────────────────────
+
+    mod distance_rebasing {
+        use super::*;
+
+        fn rows(distances: &[Option<f64>]) -> Vec<RecordRow> {
+            distances
+                .iter()
+                .map(|&distance| RecordRow { distance, ..Default::default() })
+                .collect()
+        }
+
+        fn distances(records: &[RecordRow]) -> Vec<Option<f64>> {
+            records.iter().map(|r| r.distance).collect()
+        }
+
+        #[test]
+        fn carried_over_total_is_rebased_to_zero() {
+            let mut records = rows(&[None, Some(8455.5), Some(8456.73), Some(8839.8)]);
+            rebase_session_distance(&mut records, Some(8455.5));
+            assert_eq!(distances(&records), vec![None, Some(0.0), Some(1.23), Some(384.3)]);
+        }
+
+        #[test]
+        fn rebased_value_matches_a_decoded_centimetre_value() {
+            // 8456.73 - 8455.5 is 1.2300000000004729 in floating point; the
+            // result must equal the decoder's own 123 / 100.
+            let mut records = rows(&[Some(8456.73)]);
+            rebase_session_distance(&mut records, Some(8455.5));
+            assert_eq!(records[0].distance, Some(123.0 / 100.0));
+        }
+
+        #[test]
+        fn device_reset_is_left_alone() {
+            let mut records = rows(&[Some(2.35), Some(10.0)]);
+            rebase_session_distance(&mut records, Some(5106.0));
+            assert_eq!(distances(&records), vec![Some(2.35), Some(10.0)]);
+        }
+
+        #[test]
+        fn nothing_carried_is_left_alone() {
+            let mut records = rows(&[Some(2.35)]);
+            rebase_session_distance(&mut records, None);
+            rebase_session_distance(&mut records, Some(0.0));
+            assert_eq!(distances(&records), vec![Some(2.35)]);
+        }
+
+        #[test]
+        fn session_without_distance_is_left_alone() {
+            let mut records = rows(&[None, None]);
+            rebase_session_distance(&mut records, Some(100.0));
+            assert_eq!(distances(&records), vec![None, None]);
         }
     }
 

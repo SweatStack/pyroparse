@@ -16,7 +16,7 @@ use crate::fit::binary::{FitEvent, FitReader, MessageDef};
 use crate::fit::profile::{self, BaseType};
 use crate::reference::{classify_developer_field, format_product_name};
 use crate::fields::{normalize_field_name, is_canonical_column, is_handled_field};
-use crate::types::{TypedColumn, promote_type, base_type_to_arrow, read_raw_f64};
+use crate::types::{TypedColumn, promote_type, base_type_to_arrow, field_arrow_type, read_raw_f64};
 use crate::{
     SessionMeta, DeviceMeta, ScanResult, ParseResult,
     RecordRow, LapBoundary, LengthInterval, SEMICIRCLE_TO_DEGREES,
@@ -645,6 +645,7 @@ impl ParseConfig {
                 "distance" => { mask[5] = true; }
                 "smo2" => { mask[57] = true; }
                 "core_temperature" => { mask[139] = true; }
+                "respiration_rate" => { mask[99] = true; mask[108] = true; }
                 // "lap" and "lap_trigger" are synthesized from Lap messages,
                 // not from Record fields — always available.
                 "lap" | "lap_trigger" => {}
@@ -722,8 +723,9 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                                     if is_canonical_column(&normalized) {
                                         field_to_extra.insert(field.number, None);
                                     } else {
-                                        // Determine Arrow type from base type.
-                                        if let Some(dtype) = base_type_to_arrow(field.base_type) {
+                                        // Arrow type from the base type, widened
+                                        // to float when the profile scales it.
+                                        if let Some(dtype) = field_arrow_type(field.base_type, pf.scale, pf.offset) {
                                             match extra_types.get_mut(&normalized) {
                                                 Some(existing) => *existing = promote_type(existing, &dtype),
                                                 None => { extra_types.insert(normalized.clone(), dtype); }
@@ -1012,6 +1014,22 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                 139 if field_mask[139] => {
                     if let Some(v) = read_u16(data, be) {
                         row.core_temperature = Some(v as f32 / 100.0);
+                    }
+                }
+                99 if field_mask[99] => {
+                    // respiration_rate (uint8): whole breaths/min — its profile
+                    // component expands it into enhanced_respiration_rate at
+                    // scale 1. Fallback only; field 108 is preferred.
+                    if row.respiration_rate.is_none() {
+                        if let Some(v) = read_u8_valid(data) {
+                            row.respiration_rate = Some(v as f32);
+                        }
+                    }
+                }
+                108 if field_mask[108] => {
+                    // enhanced_respiration_rate (uint16, scale 100, breaths/min)
+                    if let Some(v) = read_u16(data, be) {
+                        row.respiration_rate = Some(v as f32 / 100.0);
                     }
                 }
                 _ if decode_extras => {

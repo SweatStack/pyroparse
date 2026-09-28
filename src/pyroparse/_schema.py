@@ -43,6 +43,7 @@ _CANONICAL_TYPES: dict[str, pa.DataType] = {
     "swim_stroke": pa.utf8(),
     "core_temperature": pa.float32(),
     "smo2": pa.float32(),
+    "respiration_rate": pa.float32(),
 }
 
 METRIC_COLUMNS = {"heart_rate", "power", "cadence", "speed"}

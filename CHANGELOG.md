@@ -16,6 +16,19 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
+## [Unreleased]
+
+### Changed
+- **`enhanced_respiration_rate` is now the canonical `respiration_rate` column** (`Float32`, breaths/min), in line with `enhanced_speed` → `speed` and `enhanced_altitude` → `altitude`. It folds the legacy whole-number `respiration_rate` field too, preferring the enhanced one. **Breaking:** select `respiration_rate` instead of `enhanced_respiration_rate`.
+
+### Fixed
+- **Scaled native fields were truncated to integers.** An extra column took its Arrow type from the field's FIT base type alone, so a field the profile scales was stored as an integer: respiration 26.16 breaths/min read 26, and `fractional_cadence` (raw / 128) was always 0. Scaled or offset fields (`stance_time`, `step_length`, `vertical_ratio`, `left_pedal_smoothness`, `cycle_length16`, and others) are now `Float64` with their exact decoded values. **Behavior change:** these columns change type from integer to float.
+- **Per-activity `distance` in multi-session files starts at the session boundary.** When a device keeps one running distance across sessions, every activity after the first began where the previous one ended (8455.5 m, 8839.8 m, …). The carried-in distance is now subtracted, so each activity's `distance` counts from zero and reconciles with its session total. Devices that restart distance per session, the first session, and single-session files are unchanged.
+
+### Build
+- **Local macOS builds load again.** On macOS 27, rustc's release-profile stripping (with its bundled LLVM `rust-objcopy`) produced extensions that failed to import with `mis-aligned LINKEDIT string pool`; uv's automatic editable rebuilds hit this too. `.cargo/config.toml` now disables rustc's stripping on macOS, which costs about 45 KB per binary.
+
+
 ## [0.8.0] - 2026-09-28
 
 ### Fixed

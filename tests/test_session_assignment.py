@@ -62,3 +62,44 @@ class TestLapsRetained:
         for a in acts:
             laps = set(a.data.column("lap").to_pylist())
             assert laps == {0} or laps == set()  # (last session may be tiny)
+
+
+class TestSessionDistance:
+    """Plan 034 §2: each activity's cumulative `distance` starts at its own
+    session boundary.
+
+    The device behind `cycling-running-rapid-9session.fit` keeps one running
+    distance across all nine sessions; the brick in
+    `cycling-rowing-cycling-rowing.fit` restarts it per session.
+    """
+
+    @staticmethod
+    def _distances(activity):
+        return activity.data.column("distance").drop_null().to_pylist()
+
+    def test_carried_over_distance_starts_near_zero(self):
+        # Within one sample's travel of the boundary (the largest is ~3 m).
+        for i, a in enumerate(Session.load_fit(RAPID).activities):
+            assert 0 <= self._distances(a)[0] < 5, f"activity {i}"
+
+    def test_carried_over_distance_reconciles_with_session_total(self):
+        for i, a in enumerate(Session.load_fit(RAPID).activities):
+            assert max(self._distances(a)) == pytest.approx(a.metadata.distance, abs=0.5), (
+                f"activity {i}"
+            )
+
+    def test_distance_stays_monotone(self):
+        for a in Session.load_fit(RAPID).activities:
+            d = self._distances(a)
+            assert all(x <= y for x, y in zip(d, d[1:]))
+
+    def test_first_session_is_unchanged(self):
+        # Session 0 is never rebased: its values are the file's own.
+        first = Session.load_fit(RAPID).activities[0]
+        assert self._distances(first)[0] == 0.0
+        assert max(self._distances(first)) == 8453.85
+
+    def test_resetting_device_is_unchanged(self):
+        for a in Session.load_fit(FOUR).activities:
+            assert min(self._distances(a)) == 0.0
+        assert max(self._distances(Session.load_fit(FOUR).activities[3])) == 2828.0
