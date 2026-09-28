@@ -13,10 +13,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use arrow::datatypes::DataType;
 
 use crate::fit::binary::{FitEvent, FitReader, MessageDef};
-use crate::fit::profile;
+use crate::fit::profile::{self, BaseType};
 use crate::reference::{classify_developer_field, format_product_name};
 use crate::fields::{normalize_field_name, is_canonical_column, is_handled_field};
-use crate::types::{TypedColumn, promote_type, base_type_to_arrow};
+use crate::types::{TypedColumn, promote_type, base_type_to_arrow, read_raw_f64};
 use crate::{
     SessionMeta, DeviceMeta, ScanResult, ParseResult,
     RecordRow, LapBoundary, LengthInterval, SEMICIRCLE_TO_DEGREES,
@@ -34,6 +34,13 @@ use crate::{
 fn read_u8_valid(data: &[u8]) -> Option<u8> {
     let v = *data.first()?;
     if v == 0xFF { None } else { Some(v) }
+}
+
+/// Read a sint8 from a field's bytes. Returns None if invalid (0x7F).
+#[inline]
+fn read_i8_valid(data: &[u8]) -> Option<i8> {
+    let v = *data.first()? as i8;
+    if v == 0x7F { None } else { Some(v) }
 }
 
 /// Read a u16 from field bytes with endianness. Returns None if invalid (0xFFFF).
@@ -144,7 +151,8 @@ pub fn scan_metadata(data: &[u8]) -> Result<ScanResult, String> {
     let mut result = ScanResult::default();
     let mut metric_set = HashSet::new();
     let mut current_app_for_idx: BTreeMap<u8, String> = BTreeMap::new();
-    let mut dev_field_owners: BTreeMap<String, String> = BTreeMap::new();
+    let mut dev_field_owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut utc_offsets: Vec<UtcOffset> = Vec::new();
 
     while let Some(event) = reader.next().map_err(|e| e.to_string())? {
         match event {
@@ -176,7 +184,9 @@ pub fn scan_metadata(data: &[u8]) -> Result<ScanResult, String> {
                         result.sessions.push(decode_session(def, field_bytes));
                     }
                     profile::MESG_ACTIVITY => {
-                        result.local_timestamp = decode_activity_local_ts(def, field_bytes);
+                        if let Some(offset) = decode_activity_offset(def, field_bytes) {
+                            utc_offsets.push(offset);
+                        }
                     }
                     profile::MESG_DEVICE_INFO => {
                         if let Some(d) = decode_device(def, field_bytes) {
@@ -189,12 +199,10 @@ pub fn scan_metadata(data: &[u8]) -> Result<ScanResult, String> {
                         }
                     }
                     profile::MESG_FIELD_DESCRIPTION => {
-                        decode_field_description(
-                            def, field_bytes,
-                            &current_app_for_idx,
-                            &mut metric_set,
-                            &mut dev_field_owners,
-                        );
+                        if let Some(fd) = decode_field_description(def, field_bytes) {
+                            note_developer_metrics(&fd.desc.name, &mut metric_set);
+                            register_field_owner(&fd, &current_app_for_idx, &mut dev_field_owners);
+                        }
                     }
                     _ => {}
                 }
@@ -216,14 +224,7 @@ pub fn scan_metadata(data: &[u8]) -> Result<ScanResult, String> {
         false,
     );
 
-    // Backfill local_timestamp from Activity message.
-    if let Some(lt) = result.local_timestamp {
-        for s in &mut result.sessions {
-            if s.start_time_local.is_none() {
-                s.start_time_local = Some(lt);
-            }
-        }
-    }
+    resolve_local_start_times(&mut result.sessions, &utc_offsets);
 
     Ok(result)
 }
@@ -313,17 +314,64 @@ fn decode_session(def: &MessageDef, field_bytes: &[u8]) -> SessionMeta {
     s
 }
 
-fn decode_activity_local_ts(def: &MessageDef, field_bytes: &[u8]) -> Option<f64> {
+// ---------------------------------------------------------------------------
+// Local time — the UTC offset carried by the Activity message
+// ---------------------------------------------------------------------------
+
+/// The UTC offset observed in an Activity message (mesg 34).
+///
+/// `local_timestamp` (field 5) is the local-time twin of that message's own
+/// `timestamp` (field 253) — the *end* of the activity. Only their difference
+/// is meaningful; it is applied to each session's `start_time`. Using
+/// `local_timestamp` as a start time is wrong by the activity's duration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UtcOffset {
+    /// Activity `timestamp`, Unix seconds.
+    pub(crate) at: i64,
+    /// `local_timestamp - timestamp`, seconds.
+    pub(crate) seconds: i64,
+}
+
+fn decode_activity_offset(def: &MessageDef, field_bytes: &[u8]) -> Option<UtcOffset> {
     let be = def.big_endian;
+    let mut timestamp = None;
+    let mut local_timestamp = None;
     for (num, data) in FieldIter::new(def, field_bytes) {
-        if num == 5 {
-            // local_timestamp (field 5 in activity message)
-            if let Some(ts) = read_u32(data, be) {
-                return Some((ts as i64 + profile::FIT_EPOCH_OFFSET) as f64);
-            }
+        match num {
+            253 => timestamp = read_u32(data, be),
+            5 => local_timestamp = read_u32(data, be),
+            _ => {}
         }
     }
-    None
+    let (ts, local) = (timestamp?, local_timestamp?);
+    // Below `date_time.min` a value is relative (seconds since power-on), not
+    // an epoch time — some Zwift files write `local_timestamp = 0` — so no
+    // offset can be derived from it.
+    if ts < profile::DATETIME_MIN || local < profile::DATETIME_MIN {
+        return None;
+    }
+    Some(UtcOffset {
+        at: ts as i64 + profile::FIT_EPOCH_OFFSET,
+        seconds: local as i64 - ts as i64,
+    })
+}
+
+/// Set `start_time_local` on every session from the Activity offsets.
+///
+/// A session takes the offset of the first Activity message (in file order)
+/// written at or after its start — the one that summarizes it — and falls
+/// back to the file's last Activity message. Message order does not matter,
+/// so summary-first files work. Without any Activity message the offset is
+/// unknowable and no local time is set. The offset is observed at the end of
+/// the activity, so a DST transition mid-activity shifts the local start by
+/// an hour; that is inherent to the format.
+pub(crate) fn resolve_local_start_times(sessions: &mut [SessionMeta], offsets: &[UtcOffset]) {
+    let Some(last) = offsets.last() else { return };
+    for session in sessions.iter_mut() {
+        let Some(start) = session.start_time else { continue };
+        let offset = offsets.iter().find(|o| o.at as f64 >= start).unwrap_or(last);
+        session.start_time_local = Some(start + offset.seconds as f64);
+    }
 }
 
 fn decode_device(def: &MessageDef, field_bytes: &[u8]) -> Option<DeviceMeta> {
@@ -394,45 +442,163 @@ fn decode_developer_data_id(def: &MessageDef, field_bytes: &[u8]) -> Option<(u8,
     dev_idx.zip(app_id)
 }
 
-fn decode_field_description(
-    def: &MessageDef,
-    field_bytes: &[u8],
-    current_app_for_idx: &BTreeMap<u8, String>,
-    metrics: &mut HashSet<String>,
-    dev_field_owners: &mut BTreeMap<String, String>,
-) {
-    let mut dev_idx: Option<u8> = None;
-    let mut field_name: Option<String> = None;
+// ---------------------------------------------------------------------------
+// Developer fields — registration (FieldDescription, mesg 206) and decoding
+// ---------------------------------------------------------------------------
+
+/// How to decode one developer field, as declared by its FieldDescription.
+///
+/// Per the FIT SDK the bytes are interpreted with the description's
+/// `fit_base_type_id` — never inferred from the field's name — and the
+/// description's own `scale`/`offset` apply as `raw / scale - offset`. The
+/// profile's native scale/offset never apply to developer fields.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DevFieldDesc {
+    pub(crate) name: String,
+    /// `fit_base_type_id` (field 2), a raw base-type byte.
+    pub(crate) base_type: u8,
+    /// `scale` (field 6); 1 when absent or zero.
+    pub(crate) scale: f64,
+    /// `offset` (field 7); 0 when absent.
+    pub(crate) offset: f64,
+    /// Slot of the owning CIQ app in `ParseResult::apps` (see `app_slot`),
+    /// once its DeveloperDataId has been seen.
+    pub(crate) app: Option<u8>,
+}
+
+/// A decoded FieldDescription message.
+struct FieldDescription {
+    /// `developer_data_index` (field 0), linking to a DeveloperDataId.
+    dev_data_index: u8,
+    /// `field_definition_number` (field 1), as used in Record definitions.
+    /// Absent in malformed files: such a field never matches data but still
+    /// identifies its app.
+    field_number: Option<u8>,
+    desc: DevFieldDesc,
+}
+
+/// Decode a FieldDescription. `None` without a `developer_data_index` and a
+/// `field_name`, the minimum needed to tie a field to an app.
+fn decode_field_description(def: &MessageDef, field_bytes: &[u8]) -> Option<FieldDescription> {
+    let mut dev_data_index = None;
+    let mut field_number = None;
+    let mut name = None;
+    let mut base_type = 0x88; // float32 when the description omits it
+    let mut scale = 1.0;
+    let mut offset = 0.0;
 
     for (num, data) in FieldIter::new(def, field_bytes) {
         match num {
-            0 => dev_idx = data.first().copied(),
-            3 => field_name = read_string(data),
+            0 => dev_data_index = read_u8_valid(data),
+            1 => field_number = read_u8_valid(data),
+            2 => base_type = read_u8_valid(data).unwrap_or(base_type),
+            3 => name = read_string(data),
+            6 => scale = read_u8_valid(data).filter(|&v| v != 0).map_or(scale, f64::from),
+            7 => offset = read_i8_valid(data).map_or(offset, f64::from),
             _ => {}
         }
     }
 
-    if let Some(name) = &field_name {
-        // Check if this developer field maps to a known metric.
-        if let Some(metric) = classify_developer_field(name) {
-            metrics.insert(metric.to_string());
-        }
+    Some(FieldDescription {
+        dev_data_index: dev_data_index?,
+        field_number,
+        desc: DevFieldDesc { name: name?, base_type, scale, offset, app: None },
+    })
+}
 
-        // Normalize and add to metrics (for extra column detection).
-        let normalized = normalize_field_name(name);
-        if !is_canonical_column(&normalized) {
-            metrics.insert(normalized);
+/// Slot of a CIQ app UUID in `apps`, appending it on first sight. Slots are
+/// stable within a file because both parse passes meet DeveloperDataIds in
+/// the same order.
+fn app_slot(apps: &mut Vec<String>, uuid: &str) -> Option<u8> {
+    let i = match apps.iter().position(|u| u == uuid) {
+        Some(i) => i,
+        None => {
+            apps.push(uuid.to_string());
+            apps.len() - 1
         }
+    };
+    u8::try_from(i).ok()
+}
 
-        // Track field → app UUID ownership.
-        if let Some(idx) = dev_idx {
-            if !dev_field_owners.contains_key(name) {
-                if let Some(uuid) = current_app_for_idx.get(&idx) {
-                    dev_field_owners.insert(name.clone(), uuid.clone());
-                }
-            }
-        }
+/// Attach the owning app's slot to a field description.
+fn attach_app(
+    fd: &mut FieldDescription,
+    current_app_for_idx: &BTreeMap<u8, String>,
+    apps: &mut Vec<String>,
+) {
+    fd.desc.app = current_app_for_idx
+        .get(&fd.dev_data_index)
+        .and_then(|uuid| app_slot(apps, uuid));
+}
+
+/// Record which CIQ apps register a developer field name, for sensor
+/// classification. Several apps may register one name (Stryd and the
+/// Concept2 data field both write `Power`); per-session data decides which
+/// is credited — see `dev_column_winners` in `lib.rs`.
+fn register_field_owner(
+    fd: &FieldDescription,
+    current_app_for_idx: &BTreeMap<u8, String>,
+    dev_field_owners: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    if let Some(uuid) = current_app_for_idx.get(&fd.dev_data_index) {
+        dev_field_owners
+            .entry(fd.desc.name.clone())
+            .or_default()
+            .insert(uuid.clone());
     }
+}
+
+/// Store a developer-sourced value, preferring a reading over a zero
+/// placeholder when several apps write the same field in one record (the app
+/// without its sensor writes 0). Remembers which app supplied the value kept.
+fn take_reading<T: Copy + PartialEq + Default>(
+    slot: &mut Option<T>,
+    app: &mut Option<u8>,
+    value: T,
+    from: Option<u8>,
+) {
+    if slot.is_none() || value != T::default() {
+        *slot = Some(value);
+        *app = from;
+    }
+}
+
+/// Add the metrics a developer field contributes (metadata scan only, where
+/// no Record data is read to confirm them).
+fn note_developer_metrics(name: &str, metrics: &mut HashSet<String>) {
+    if let Some(metric) = classify_developer_field(name) {
+        metrics.insert(metric.to_string());
+    }
+    let normalized = normalize_field_name(name);
+    if !is_canonical_column(&normalized) {
+        metrics.insert(normalized);
+    }
+}
+
+/// Decode a developer field value per its description: the bytes are read
+/// with the declared base type and the definition's byte order, then the
+/// description's scale and offset are applied. `None` for the base type's
+/// invalid sentinel, a non-finite float, or a size mismatch.
+fn read_dev_value(data: &[u8], desc: &DevFieldDesc, big_endian: bool) -> Option<f64> {
+    let raw = read_raw_f64(data, BaseType::from_byte(desc.base_type), big_endian)?;
+    Some(raw / desc.scale - desc.offset)
+}
+
+/// Walk a data message's developer field slots, yielding each registered
+/// field's description and bytes. Unregistered slots are skipped.
+fn dev_field_values<'a>(
+    def: &'a MessageDef,
+    dev_field_bytes: &'a [u8],
+    descs: &'a HashMap<(u8, u8), DevFieldDesc>,
+) -> impl Iterator<Item = (&'a DevFieldDesc, &'a [u8])> + 'a {
+    let mut offset = 0usize;
+    def.dev_fields.iter().filter_map(move |field| {
+        let start = offset;
+        offset += field.size as usize;
+        let data = dev_field_bytes.get(start..offset)?;
+        let desc = descs.get(&(field.dev_data_index, field.number))?;
+        Some((desc, data))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -519,7 +685,11 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
     let mut laps = Vec::new();
     let mut lengths: Vec<LengthInterval> = Vec::new();
     let mut current_app_for_idx: BTreeMap<u8, String> = BTreeMap::new();
-    let mut dev_field_owners: BTreeMap<String, String> = BTreeMap::new();
+    let mut dev_field_owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut utc_offsets: Vec<UtcOffset> = Vec::new();
+    // CIQ app UUIDs by slot; `DevFieldDesc::app` and the `RecordRow::*_app`
+    // fields index into this.
+    let mut apps: Vec<String> = Vec::new();
 
     let mut n_rows = 0usize;
     let mut extra_types: BTreeMap<String, DataType> = BTreeMap::new();
@@ -528,9 +698,9 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
     // Key: field_number, Value: normalized column name (or None if handled).
     let mut field_to_extra: HashMap<u8, Option<String>> = HashMap::new();
 
-    // Also track developer field names for extra column discovery.
-    // Key: (dev_data_index, field_number) from definition, Value: field name from FieldDescription.
-    let mut dev_field_names: HashMap<(u8, u8), (String, u8)> = HashMap::new();
+    // Developer field registrations, for extra column discovery and decoding.
+    // Key: (developer_data_index, field_number) as used in Record definitions.
+    let mut dev_field_descs: HashMap<(u8, u8), DevFieldDesc> = HashMap::new();
 
     while let Some(event) = reader.next().map_err(|e| e.to_string())? {
         match event {
@@ -582,9 +752,9 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                         // Developer fields in Record definitions → extra columns.
                         for dev_field in &def.dev_fields {
                             let key = (dev_field.dev_data_index, dev_field.number);
-                            if let Some((name, _bt)) = dev_field_names.get(&key) {
-                                if !is_handled_field(name) {
-                                    if let Some(col) = column_for_developer_field(name) {
+                            if let Some(desc) = dev_field_descs.get(&key) {
+                                if !is_handled_field(&desc.name) {
+                                    if let Some(col) = column_for_developer_field(&desc.name) {
                                         let dtype = DataType::Float64;
                                         match extra_types.get_mut(&col) {
                                             Some(existing) => *existing = promote_type(existing, &dtype),
@@ -616,13 +786,8 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                         sessions.push(decode_session(def, field_bytes));
                     }
                     profile::MESG_ACTIVITY => {
-                        // Extract local_timestamp — backfill into sessions later.
-                        if let Some(lt) = decode_activity_local_ts(def, field_bytes) {
-                            for s in &mut sessions {
-                                if s.start_time_local.is_none() {
-                                    s.start_time_local = Some(lt);
-                                }
-                            }
+                        if let Some(offset) = decode_activity_offset(def, field_bytes) {
+                            utc_offsets.push(offset);
                         }
                     }
                     profile::MESG_DEVICE_INFO => {
@@ -646,12 +811,13 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                         }
                     }
                     profile::MESG_FIELD_DESCRIPTION => {
-                        decode_field_description_full(
-                            def, field_bytes,
-                            &current_app_for_idx,
-                            &mut dev_field_owners,
-                            &mut dev_field_names,
-                        );
+                        if let Some(mut fd) = decode_field_description(def, field_bytes) {
+                            attach_app(&mut fd, &current_app_for_idx, &mut apps);
+                            register_field_owner(&fd, &current_app_for_idx, &mut dev_field_owners);
+                            if let Some(num) = fd.field_number {
+                                dev_field_descs.insert((fd.dev_data_index, num), fd.desc);
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -660,6 +826,10 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
             FitEvent::FileHeader(_) | FitEvent::Crc { .. } => {}
         }
     }
+
+    // Sessions may precede the Activity message that carries the UTC offset
+    // (summary-first files), so local start times resolve after the pass.
+    resolve_local_start_times(&mut sessions, &utc_offsets);
 
     // Build extra column info and lookup.
     let extra_col_info: Vec<(String, DataType)> = extra_types.into_iter().collect();
@@ -694,9 +864,10 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
     let mut row_idx = 0usize;
     let mut base_timestamp: Option<u32> = None;
 
-    // Reset dev_field_names — rebuild during pass 2 to stay in sync with
-    // session-local developer data index assignments.
-    dev_field_names.clear();
+    // Rebuild developer field registrations during pass 2 so lookups follow
+    // file order (a developer_data_index may be reassigned mid-file).
+    dev_field_descs.clear();
+    current_app_for_idx.clear();
 
     while let Some(event) = reader.next().map_err(|e| e.to_string())? {
         // Extract compressed timestamp offset.
@@ -725,24 +896,21 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                     }
                 }
             }
-            // Re-process FieldDescription to keep dev_field_names in sync.
-            if def.global_message_number == profile::MESG_FIELD_DESCRIPTION {
-                let mut dev_idx: Option<u8> = None;
-                let mut field_def_num: Option<u8> = None;
-                let mut field_name: Option<String> = None;
-                let mut base_type_id: u8 = 0x88; // default float32
-                for (num, fdata) in FieldIter::new(def, field_bytes) {
-                    match num {
-                        0 => dev_idx = fdata.first().copied(),
-                        1 => field_def_num = fdata.first().copied(),
-                        2 => base_type_id = fdata.first().copied().unwrap_or(0x88),
-                        3 => field_name = read_string(fdata),
-                        _ => {}
+            match def.global_message_number {
+                profile::MESG_DEVELOPER_DATA_ID => {
+                    if let Some((idx, uuid)) = decode_developer_data_id(def, field_bytes) {
+                        current_app_for_idx.insert(idx, uuid);
                     }
                 }
-                if let (Some(idx), Some(fdn), Some(name)) = (dev_idx, field_def_num, field_name) {
-                    dev_field_names.insert((idx, fdn), (name, base_type_id));
+                profile::MESG_FIELD_DESCRIPTION => {
+                    if let Some(mut fd) = decode_field_description(def, field_bytes) {
+                        attach_app(&mut fd, &current_app_for_idx, &mut apps);
+                        if let Some(num) = fd.field_number {
+                            dev_field_descs.insert((fd.dev_data_index, num), fd.desc);
+                        }
+                    }
                 }
+                _ => {}
             }
             continue;
         }
@@ -868,10 +1036,10 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
         // Developer fields — special-cased ones (Power, Cadence, core_temp,
         // smo2) always decoded into RecordRow for merge logic. Extras only
         // when requested.
-        decode_record_dev_fields(def, dev_field_bytes, &dev_field_names, &mut row);
+        decode_record_dev_fields(def, dev_field_bytes, &dev_field_descs, &mut row);
         if decode_extras {
             decode_record_dev_extras(
-                def, dev_field_bytes, &dev_field_names,
+                def, dev_field_bytes, &dev_field_descs,
                 &norm_to_col, &mut extra_data, row_idx,
             );
         }
@@ -893,6 +1061,7 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
         developer_sensors,
         laps,
         lengths,
+        apps,
     })
 }
 
@@ -1318,144 +1487,58 @@ fn decode_length(def: &MessageDef, field_bytes: &[u8]) -> Option<LengthInterval>
     })
 }
 
-/// Extended FieldDescription decoder for full parse — also tracks
-/// (dev_data_index, field_number) → field_name for developer field lookup.
-fn decode_field_description_full(
-    def: &MessageDef,
-    field_bytes: &[u8],
-    current_app_for_idx: &BTreeMap<u8, String>,
-    dev_field_owners: &mut BTreeMap<String, String>,
-    dev_field_names: &mut HashMap<(u8, u8), (String, u8)>,
-) {
-    let mut dev_idx: Option<u8> = None;
-    let mut field_def_num: Option<u8> = None;
-    let mut field_name: Option<String> = None;
-    let mut base_type_id: u8 = 0x88; // default float32
-
-    for (num, data) in FieldIter::new(def, field_bytes) {
-        match num {
-            0 => dev_idx = data.first().copied(),
-            1 => field_def_num = data.first().copied(),
-            2 => base_type_id = data.first().copied().unwrap_or(0x88),
-            3 => field_name = read_string(data),
-            _ => {}
-        }
-    }
-
-    if let (Some(idx), Some(fdn)) = (dev_idx, field_def_num) {
-        if let Some(name) = &field_name {
-            dev_field_names.insert((idx, fdn), (name.clone(), base_type_id));
-        }
-    }
-
-    if let (Some(idx), Some(name)) = (dev_idx, &field_name) {
-        if !dev_field_owners.contains_key(name) {
-            if let Some(uuid) = current_app_for_idx.get(&idx) {
-                dev_field_owners.insert(name.clone(), uuid.clone());
-            }
-        }
-    }
-}
-
-/// Decode developer fields in a Record message.
+/// Decode the developer fields that fold into canonical `RecordRow` columns
+/// (Stryd Power/Cadence, CORE temperature, muscle-oxygen SmO2). The name set
+/// mirrors `is_handled_field`. Values are read per their FieldDescription, so
+/// integer and float encodings both work.
 fn decode_record_dev_fields(
     def: &MessageDef,
     dev_field_bytes: &[u8],
-    dev_field_names: &HashMap<(u8, u8), (String, u8)>,
+    dev_field_descs: &HashMap<(u8, u8), DevFieldDesc>,
     row: &mut RecordRow,
 ) {
-    let mut offset = 0;
-    for dev_field in &def.dev_fields {
-        let size = dev_field.size as usize;
-        if offset + size > dev_field_bytes.len() { break; }
-        let data = &dev_field_bytes[offset..offset + size];
-        offset += size;
-
-        let key = (dev_field.dev_data_index, dev_field.number);
-        let (name, _bt) = match dev_field_names.get(&key) {
-            Some(v) => (v.0.as_str(), v.1),
-            None => continue,
-        };
-
-        match name {
+    for (desc, data) in dev_field_values(def, dev_field_bytes, dev_field_descs) {
+        let Some(value) = read_dev_value(data, desc, def.big_endian) else { continue };
+        let from = desc.app;
+        match desc.name.as_str() {
             "Power" => {
-                if let Some(v) = read_dev_u16(data) {
-                    row.dev_power = Some(v as i16);
-                }
+                take_reading(&mut row.dev_power, &mut row.dev_power_app, value.round() as i16, from);
             }
             "Cadence" => {
-                if let Some(v) = read_dev_u8(data) {
-                    row.dev_cadence = Some(v as i16);
-                }
+                take_reading(&mut row.dev_cadence, &mut row.dev_cadence_app, value.round() as i16, from);
             }
             "Core Body Temperature" | "core_temperature" => {
-                row.core_temperature = read_dev_f32(data);
+                take_reading(&mut row.core_temperature, &mut row.core_temperature_app, value as f32, from);
             }
             "Current Saturated Hemoglobin Percent" | "SmO2" | "smo2"
             | "saturated_hemoglobin_percent" => {
-                row.smo2 = read_dev_f32(data);
+                take_reading(&mut row.smo2, &mut row.smo2_app, value as f32, from);
             }
             _ => {}
         }
     }
 }
 
-/// Decode non-special developer fields into extra columns.
+/// Decode the remaining developer fields into their extra columns.
 fn decode_record_dev_extras(
     def: &MessageDef,
     dev_field_bytes: &[u8],
-    dev_field_names: &HashMap<(u8, u8), (String, u8)>,
+    dev_field_descs: &HashMap<(u8, u8), DevFieldDesc>,
     norm_to_col: &HashMap<&str, usize>,
     extra_data: &mut [TypedColumn],
     row_idx: usize,
 ) {
-    let mut offset = 0;
-    for dev_field in &def.dev_fields {
-        let size = dev_field.size as usize;
-        if offset + size > dev_field_bytes.len() { break; }
-        let data = &dev_field_bytes[offset..offset + size];
-        offset += size;
-
-        let key = (dev_field.dev_data_index, dev_field.number);
-        let (name, base_type_id) = match dev_field_names.get(&key) {
-            Some(v) => (v.0.as_str(), v.1),
-            None => continue,
-        };
-
-        // Skip fields already handled by decode_record_dev_fields.
-        if is_handled_field(name) { continue; }
-
-        // Resolve to an extra column name.
-        if let Some(col_name) = column_for_developer_field(name) {
-            if let Some(&col_idx) = norm_to_col.get(col_name.as_str()) {
-                // Use the base type from the FieldDescription, no scale/offset
-                // for developer fields.
-                extra_data[col_idx].set_from_bytes(
-                    row_idx, data, base_type_id, false, 1.0, 0.0,
-                );
-            }
+    for (desc, data) in dev_field_values(def, dev_field_bytes, dev_field_descs) {
+        if is_handled_field(&desc.name) {
+            continue;
+        }
+        let Some(col_name) = column_for_developer_field(&desc.name) else { continue };
+        if let Some(&col_idx) = norm_to_col.get(col_name.as_str()) {
+            extra_data[col_idx].set_from_bytes(
+                row_idx, data, desc.base_type, def.big_endian, desc.scale, desc.offset,
+            );
         }
     }
-}
-
-/// Read a developer field as u16 (assumes LE, 2 bytes).
-fn read_dev_u16(data: &[u8]) -> Option<u16> {
-    if data.len() < 2 { return None; }
-    let v = u16::from_le_bytes([data[0], data[1]]);
-    if v == 0xFFFF { None } else { Some(v) }
-}
-
-/// Read a developer field as u8.
-fn read_dev_u8(data: &[u8]) -> Option<u8> {
-    let v = *data.first()?;
-    if v == 0xFF { None } else { Some(v) }
-}
-
-/// Read a developer field as f32 (assumes LE, 4 bytes, IEEE 754).
-fn read_dev_f32(data: &[u8]) -> Option<f32> {
-    if data.len() < 4 { return None; }
-    let v = f32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-    if v.is_finite() { Some(v) } else { None }
 }
 
 // ---------------------------------------------------------------------------
@@ -1550,4 +1633,133 @@ mod tests {
         assert!(!result.laps.is_empty(), "expected laps");
     }
 
+    // -- Developer field decoding --
+
+    fn desc(base_type: u8, scale: f64, offset: f64) -> DevFieldDesc {
+        DevFieldDesc { name: "x".into(), base_type, scale, offset, app: None }
+    }
+
+    #[test]
+    fn reading_beats_zero_placeholder_regardless_of_order() {
+        let (mut value, mut app) = (None, None);
+        take_reading(&mut value, &mut app, 0i16, Some(1));
+        take_reading(&mut value, &mut app, 250, Some(0));
+        assert_eq!((value, app), (Some(250), Some(0)));
+        take_reading(&mut value, &mut app, 0, Some(1));
+        assert_eq!((value, app), (Some(250), Some(0)));
+    }
+
+    #[test]
+    fn app_slots_are_stable_per_uuid() {
+        let mut apps = Vec::new();
+        assert_eq!(app_slot(&mut apps, "a"), Some(0));
+        assert_eq!(app_slot(&mut apps, "b"), Some(1));
+        assert_eq!(app_slot(&mut apps, "a"), Some(0));
+        assert_eq!(apps, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn dev_value_uses_declared_base_type() {
+        assert_eq!(read_dev_value(&[65], &desc(0x02, 1.0, 0.0), false), Some(65.0));
+        assert_eq!(read_dev_value(&[0x8D, 0x02], &desc(0x84, 10.0, 0.0), false), Some(65.3));
+        assert_eq!(read_dev_value(&[0xF4, 0xFF], &desc(0x83, 1.0, 0.0), false), Some(-12.0));
+        let float = 65.3f32.to_le_bytes();
+        assert_eq!(read_dev_value(&float, &desc(0x88, 1.0, 0.0), false), Some(65.3f32 as f64));
+    }
+
+    #[test]
+    fn dev_value_applies_scale_then_offset() {
+        // raw / scale - offset: 81 / 2 - 10 = 30.5
+        assert_eq!(read_dev_value(&[81], &desc(0x02, 2.0, 10.0), false), Some(30.5));
+    }
+
+    #[test]
+    fn dev_value_honours_byte_order() {
+        assert_eq!(read_dev_value(&[0x02, 0x8D], &desc(0x84, 1.0, 0.0), true), Some(653.0));
+    }
+
+    #[test]
+    fn dev_value_invalid_or_short_is_none() {
+        assert_eq!(read_dev_value(&[0xFF], &desc(0x02, 1.0, 0.0), false), None);
+        assert_eq!(read_dev_value(&[0xFF, 0xFF], &desc(0x84, 10.0, 0.0), false), None);
+        assert_eq!(read_dev_value(&[0x8D], &desc(0x84, 1.0, 0.0), false), None);
+        assert_eq!(read_dev_value(&[0xFF; 4], &desc(0x88, 1.0, 0.0), false), None);
+    }
+
+    // -- Local start time --
+
+    fn activity_def() -> MessageDef {
+        use crate::fit::binary::FieldLayout;
+        MessageDef {
+            global_message_number: profile::MESG_ACTIVITY,
+            big_endian: false,
+            fields: vec![
+                FieldLayout { number: 253, size: 4, base_type: 0x86 },
+                FieldLayout { number: 5, size: 4, base_type: 0x86 },
+            ],
+            dev_fields: vec![],
+            data_size: 8,
+            dev_data_size: 0,
+        }
+    }
+
+    #[test]
+    fn activity_offset_is_local_minus_utc() {
+        let ts: u32 = 1_000_000_000;
+        let mut bytes = ts.to_le_bytes().to_vec();
+        bytes.extend((ts + 7_200).to_le_bytes());
+        let offset = decode_activity_offset(&activity_def(), &bytes).unwrap();
+        assert_eq!(offset.seconds, 7_200);
+        assert_eq!(offset.at, ts as i64 + profile::FIT_EPOCH_OFFSET);
+    }
+
+    #[test]
+    fn relative_activity_timestamps_give_no_offset() {
+        // Zwift writes local_timestamp = 0, which is below date_time.min.
+        let mut bytes = 1_000_000_000u32.to_le_bytes().to_vec();
+        bytes.extend(0u32.to_le_bytes());
+        assert_eq!(decode_activity_offset(&activity_def(), &bytes), None);
+    }
+
+    fn session_starting_at(start: i64) -> SessionMeta {
+        SessionMeta { start_time: Some(start as f64), ..Default::default() }
+    }
+
+    #[test]
+    fn local_start_applies_offset_of_covering_activity() {
+        let mut sessions = vec![session_starting_at(1_000), session_starting_at(5_000)];
+        let offsets = [UtcOffset { at: 9_000, seconds: 7_200 }];
+        resolve_local_start_times(&mut sessions, &offsets);
+        assert_eq!(sessions[0].start_time_local, Some(8_200.0));
+        assert_eq!(sessions[1].start_time_local, Some(12_200.0));
+    }
+
+    #[test]
+    fn local_start_picks_first_activity_at_or_after_session_start() {
+        // Chained multisport: one Activity per leg, legs in different zones.
+        let mut sessions = vec![session_starting_at(1_000), session_starting_at(5_000)];
+        let offsets = [
+            UtcOffset { at: 4_000, seconds: 3_600 },
+            UtcOffset { at: 9_000, seconds: 7_200 },
+        ];
+        resolve_local_start_times(&mut sessions, &offsets);
+        assert_eq!(sessions[0].start_time_local, Some(4_600.0));
+        assert_eq!(sessions[1].start_time_local, Some(12_200.0));
+    }
+
+    #[test]
+    fn local_start_falls_back_to_last_activity() {
+        // Activity timestamp before the session start (pinned or odd clock).
+        let mut sessions = vec![session_starting_at(5_000)];
+        let offsets = [UtcOffset { at: 4_000, seconds: -18_000 }];
+        resolve_local_start_times(&mut sessions, &offsets);
+        assert_eq!(sessions[0].start_time_local, Some(-13_000.0));
+    }
+
+    #[test]
+    fn local_start_unknown_without_activity_message() {
+        let mut sessions = vec![session_starting_at(1_000)];
+        resolve_local_start_times(&mut sessions, &[]);
+        assert_eq!(sessions[0].start_time_local, None);
+    }
 }

@@ -16,6 +16,20 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
+## [Unreleased]
+
+### Fixed
+- **`start_time_local` was the local *end* time.** The FIT Activity message pairs its own `timestamp` (the end of the activity) with `local_timestamp`; pyroparse used the latter directly as the start, so every local start time was late by the activity's duration. The UTC offset (`local_timestamp − timestamp`) is now applied to the session `start_time`. Local times also resolve for summary-first files (Activity before Session), which previously got none.
+- **Developer fields decode per their FieldDescription.** Values are read with the declared `fit_base_type_id`, the definition's byte order, and the description's `scale`/`offset`, as the FIT SDK specifies. Previously SmO2 and core temperature were assumed float32 and Stryd Power/Cadence assumed integer, so an app logging SmO2 as an integer produced an empty `smo2` column, and scaled developer extras came out unscaled.
+- **Same-named developer fields from different apps no longer clobber each other.** When two CIQ apps register the same field name (Stryd and the Concept2 data field both write `Power` and `Cadence`), a zero placeholder from the idle app could overwrite the other app's reading within a record, and the column was credited to whichever app registered first. A reading now beats a placeholder, and the app that supplied the most readings in a session is credited.
+- **`start_time_local` is `None` when the Activity `local_timestamp` is a relative value** (below the FIT `date_time.min` threshold, as some Zwift files write), instead of a date in 1989.
+- **`pyroparse.duckdb` works with DuckDB ≥ 1.1 again.** `duckdb.default_connection` became a function in DuckDB 1.1; the integration still read it as an attribute and failed with `AttributeError: 'builtin_function_or_method' object has no attribute 'from_arrow'` whenever no connection was passed.
+- **Connect IQ apps that wrote no readings are no longer listed as devices.** A developer device is credited only with columns in which it wrote at least one reading — a non-null, non-zero value, the same convention the power/cadence merge already uses — so an installed-but-idle data field (e.g. Concept2 on a run, which writes only sentinels or zeros) is omitted. Metadata-only loads (`open_fit`, `scan_fit`) cannot see record data and still list every registered app.
+
+### Documentation
+- `docs/FIT-FORMAT.md`: corrected the FieldDescription field numbers (`scale`=6, `offset`=7, `units`=8, `native_field_num`=15), removed a non-existent `local_timestamp` from the session table, and documented how local time derives from the Activity message.
+
+
 ## [0.7.0] - 2026-08-21
 
 ### Added

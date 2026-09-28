@@ -18,7 +18,7 @@ class TestScanFit:
         result = ppl.scan_fit(str(FIXTURES))
         # One row per single-activity fixture; course.fit and the multi-session
         # files are skipped. Kept in sync with test_batch.N_ACTIVITY_FIXTURES.
-        assert len(result) == 9
+        assert len(result) == 11
 
     def test_has_sport_column(self):
         result = ppl.scan_fit(str(FIXTURES))

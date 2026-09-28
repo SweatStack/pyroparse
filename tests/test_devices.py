@@ -254,11 +254,16 @@ class TestPerSessionAttribution:
                     f"Activity {i}: Stryd should keep drag_factor regardless of power winner"
                 )
 
-    def test_core_detected_in_all_sessions(self, multi_session):
-        """CORE body temp sensor should be detected in every session."""
+    def test_idle_core_app_is_not_listed(self, multi_session, multi_session_path):
+        """The CORE app is registered in this file but never wrote a reading
+        (no sensor was paired), so no session lists it. The lazy scan sees only
+        the registration and still does — see test_parser_parity."""
         for i, a in enumerate(multi_session.activities):
-            core = next((d for d in a.metadata.devices if d.manufacturer == "core"), None)
-            assert core is not None, f"Activity {i} should detect CORE sensor"
+            assert all(d.manufacturer != "core" for d in a.metadata.devices), (
+                f"Activity {i} lists the idle CORE app"
+            )
+        lazy = Session.open_fit(multi_session_path).activities[0].metadata.devices
+        assert any(d.manufacturer == "core" for d in lazy)
 
     def test_power_attribution_differs_across_sessions(self, multi_session):
         """At least one session should attribute power differently (the whole point)."""

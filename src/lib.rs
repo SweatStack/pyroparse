@@ -11,8 +11,8 @@ use fields::{is_canonical_column, normalize_field_name};
 use types::TypedColumn;
 
 use arrow::array::{
-    Float32Array, Float64Array, Int16Array, Int8Array, StringArray,
-    TimestampMicrosecondArray,
+    ArrowPrimitiveType, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+    Int8Array, PrimitiveArray, StringArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -120,6 +120,8 @@ const COLUMN_ATTRIBUTIONS: &[ColumnAttribution] = &[
 pub(crate) struct DeveloperSensor {
     pub(crate) manufacturer: String,
     pub(crate) product: String,
+    /// CIQ application UUID; matches `ParseResult::apps` entries.
+    pub(crate) uuid: String,
     pub(crate) columns: Vec<String>,
 }
 
@@ -193,28 +195,31 @@ pub(crate) fn column_for_developer_field(name: &str) -> Option<String> {
 /// Uses the temporal relationship between DeveloperDataId and FieldDescription
 /// messages: each FieldDescription belongs to the most recent DeveloperDataId
 /// that registered its `developer_data_index`.  This is tracked during parsing
-/// in `dev_field_owners` (field_name → app UUID).
+/// in `dev_field_owners` (field_name → app UUIDs). Several apps may register
+/// the same name; every registrant starts out credited with the column, and
+/// `attribute_devices` narrows that to the app that supplied the readings.
 ///
 /// When `include_columns` is true, each sensor's `columns` list is populated
 /// with the output column names that appear in the data.  When false (metadata-
 /// only scan), sensors are classified but columns are left empty.
 pub(crate) fn classify_developer_sensors(
-    dev_field_owners: &BTreeMap<String, String>,
+    dev_field_owners: &BTreeMap<String, BTreeSet<String>>,
     present_extra_columns: &BTreeSet<String>,
     include_columns: bool,
 ) -> Vec<DeveloperSensor> {
     // Group fields by their owning app UUID.
     let mut app_columns: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
 
-    for (field_name, uuid) in dev_field_owners {
-        let (_, _) = name_for_uuid(uuid); // ensure entry exists
-        let entry = app_columns.entry(uuid.as_str()).or_default();
-        if include_columns {
-            if let Some(col) = column_for_developer_field(field_name) {
-                let exists =
-                    present_extra_columns.contains(&col) || is_canonical_column(&col);
-                if exists {
-                    entry.insert(col);
+    for (field_name, uuids) in dev_field_owners {
+        for uuid in uuids {
+            let entry = app_columns.entry(uuid.as_str()).or_default();
+            if include_columns {
+                if let Some(col) = column_for_developer_field(field_name) {
+                    let exists =
+                        present_extra_columns.contains(&col) || is_canonical_column(&col);
+                    if exists {
+                        entry.insert(col);
+                    }
                 }
             }
         }
@@ -227,6 +232,7 @@ pub(crate) fn classify_developer_sensors(
             DeveloperSensor {
                 manufacturer: manufacturer.into(),
                 product: product.into(),
+                uuid: uuid.into(),
                 columns: cols.into_iter().collect(),
             }
         })
@@ -257,6 +263,13 @@ pub(crate) struct RecordRow {
     // we can pick the winner per-session after slicing.
     pub(crate) dev_power: Option<i16>,
     pub(crate) dev_cadence: Option<i16>,
+    // App slot (into `ParseResult::apps`) that supplied each developer-sourced
+    // value, so a column can be credited per session when several CIQ apps
+    // register the same field name.
+    pub(crate) dev_power_app: Option<u8>,
+    pub(crate) dev_cadence_app: Option<u8>,
+    pub(crate) smo2_app: Option<u8>,
+    pub(crate) core_temperature_app: Option<u8>,
 }
 
 #[derive(Default)]
@@ -332,6 +345,8 @@ pub(crate) struct ParseResult {
     /// Pool-swim Length intervals, sorted by `start_time_us`. Empty for every
     /// non-pool-swim file.
     pub(crate) lengths: Vec<LengthInterval>,
+    /// CIQ app UUIDs by slot, as referenced by `RecordRow::*_app`.
+    pub(crate) apps: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -373,7 +388,6 @@ pub(crate) struct ScanResult {
     pub(crate) file_type: Option<String>,
     pub(crate) sessions: Vec<SessionMeta>,
     pub(crate) devices: Vec<DeviceMeta>,
-    pub(crate) local_timestamp: Option<f64>,
     pub(crate) record_metrics: Vec<String>,
     pub(crate) developer_sensors: Vec<DeveloperSensor>,
 }
@@ -750,6 +764,35 @@ fn detect_metrics(batch: &RecordBatch) -> Vec<String> {
     metrics
 }
 
+/// Columns holding at least one reading — a non-null value other than zero.
+/// Zero is what a data field writes while its sensor is absent (the same
+/// convention `resolve_merge` relies on for power and cadence), so an
+/// all-zero column is no evidence that its source contributed.
+fn detect_readings(batch: &RecordBatch) -> Vec<String> {
+    let schema = batch.schema();
+    (1..batch.num_columns())
+        .filter(|&i| has_reading(batch.column(i).as_ref()))
+        .map(|i| schema.field(i).name().clone())
+        .collect()
+}
+
+fn has_reading(array: &dyn arrow::array::Array) -> bool {
+    fn any_nonzero<T: ArrowPrimitiveType>(a: &PrimitiveArray<T>) -> bool {
+        a.iter().any(|v| v.is_some_and(|x| x != T::Native::default()))
+    }
+    let any = array.as_any();
+    if let Some(a) = any.downcast_ref::<Int8Array>() { return any_nonzero(a); }
+    if let Some(a) = any.downcast_ref::<Int16Array>() { return any_nonzero(a); }
+    if let Some(a) = any.downcast_ref::<Int32Array>() { return any_nonzero(a); }
+    if let Some(a) = any.downcast_ref::<Int64Array>() { return any_nonzero(a); }
+    if let Some(a) = any.downcast_ref::<Float32Array>() { return any_nonzero(a); }
+    if let Some(a) = any.downcast_ref::<Float64Array>() { return any_nonzero(a); }
+    if let Some(a) = any.downcast_ref::<StringArray>() {
+        return a.iter().any(|v| v.is_some_and(|s| !s.is_empty()));
+    }
+    array.null_count() < array.len()
+}
+
 // ---------------------------------------------------------------------------
 // Python dict construction helpers
 // ---------------------------------------------------------------------------
@@ -901,6 +944,54 @@ fn resolve_merge(records: &mut [RecordRow]) -> u8 {
     dev_won
 }
 
+/// The app credited with a developer-sourced column: the one that supplied
+/// the most readings (non-null, non-zero values) in this record slice. Ties
+/// go to the lowest slot, for determinism.
+fn winning_app(
+    records: &[RecordRow],
+    has_reading: impl Fn(&RecordRow) -> bool,
+    app: impl Fn(&RecordRow) -> Option<u8>,
+) -> Option<u8> {
+    let mut counts: BTreeMap<u8, u32> = BTreeMap::new();
+    for row in records.iter().filter(|r| has_reading(r)) {
+        if let Some(slot) = app(row) {
+            *counts.entry(slot).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|&(slot, n)| (n, std::cmp::Reverse(slot)))
+        .map(|(slot, _)| slot)
+}
+
+/// Which app is credited with each developer-sourced canonical column in this
+/// session. `dev_won` is `resolve_merge`'s bitmask: power and cadence are
+/// developer-sourced only when the developer field won the merge.
+fn dev_column_winners(records: &[RecordRow], dev_won: u8) -> Vec<(&'static str, u8)> {
+    let mut winners = Vec::new();
+    if dev_won & 1 != 0 {
+        if let Some(a) = winning_app(records, |r| r.dev_power.unwrap_or(0) != 0, |r| r.dev_power_app) {
+            winners.push(("power", a));
+        }
+    }
+    if dev_won & 2 != 0 {
+        if let Some(a) = winning_app(records, |r| r.dev_cadence.unwrap_or(0) != 0, |r| r.dev_cadence_app) {
+            winners.push(("cadence", a));
+        }
+    }
+    if let Some(a) = winning_app(records, |r| r.smo2.is_some_and(|v| v != 0.0), |r| r.smo2_app) {
+        winners.push(("smo2", a));
+    }
+    if let Some(a) = winning_app(
+        records,
+        |r| r.core_temperature.is_some_and(|v| v != 0.0),
+        |r| r.core_temperature_app,
+    ) {
+        winners.push(("core_temperature", a));
+    }
+    winners
+}
+
 /// Find the hardware device that matches an ANT+ device type.
 /// Skips the creator device (device_index == 0).
 /// When multiple devices match, prefer the one with the highest device_index.
@@ -942,16 +1033,46 @@ fn find_creator_device(devices: &[DeviceMeta]) -> Option<usize> {
 
 /// Build per-session device list with column attribution based on merge outcome.
 ///
-/// `metrics` lists standard columns that actually contain data in this session,
-/// so we only attribute columns the session really has.
+/// `metrics` lists the columns that actually contain data in this session, so
+/// we only attribute columns the session really has. `readings` lists the
+/// columns holding at least one non-zero value (see `detect_readings`):
+/// developer sensors (CIQ apps) are credited only with those, and an app
+/// credited with none is dropped. `dev_winners` (see `dev_column_winners`)
+/// names, per developer-sourced canonical column, the app slot in `apps`
+/// that supplied the readings; other apps registering the same field name
+/// lose the column.
 fn attribute_devices(
     base_devices: &[DeviceMeta],
     developer_sensors: &[DeveloperSensor],
     dev_won: u8,
     metrics: &[String],
+    readings: &[String],
+    dev_winners: &[(&str, u8)],
+    apps: &[String],
 ) -> (Vec<DeviceMeta>, Vec<DeveloperSensor>) {
     let mut devices: Vec<DeviceMeta> = base_devices.to_vec();
     let mut sensors: Vec<DeveloperSensor> = developer_sensors.to_vec();
+
+    // A developer sensor's columns come from Record *definitions*, which
+    // declare an app's fields whether or not the app ever wrote a reading (an
+    // installed Concept2 data field on a run writes only sentinels or zeros).
+    // Keep only columns with a reading in this session; a sensor left with
+    // none is dropped below.
+    for sensor in &mut sensors {
+        sensor.columns.retain(|c| readings.contains(c));
+    }
+
+    // When several apps register the same field name (Stryd and the Concept2
+    // data field both write `Power`), the column goes to the app whose
+    // readings were kept.
+    for &(col, slot) in dev_winners {
+        let winner = apps.get(slot as usize);
+        for sensor in &mut sensors {
+            if Some(&sensor.uuid) != winner {
+                sensor.columns.retain(|c| c != col);
+            }
+        }
+    }
 
     // Track which mergeable columns we've seen (for bitmask indexing).
     let mut merge_bit: usize = 0;
@@ -1103,9 +1224,13 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             &parsed.lengths, pool_length,
         )?;
         let metrics = detect_metrics(&batch);
+        let readings = detect_readings(&batch);
+        let winners = dev_column_winners(&parsed.records, dev_won);
         let deduped = dedup_devices(&parsed.devices);
-        let (devices, sensors) =
-            attribute_devices(&deduped, &parsed.developer_sensors, dev_won, &metrics);
+        let (devices, sensors) = attribute_devices(
+            &deduped, &parsed.developer_sensors, dev_won, &metrics, &readings,
+            &winners, &parsed.apps,
+        );
 
         activities.append(build_activity_dict(
             py,
@@ -1185,9 +1310,13 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             let full_batch = merge_fixed_with_extras(&session_batch, &batch.slice(first, len))?;
 
             let metrics = detect_metrics(&full_batch);
+            let readings = detect_readings(&full_batch);
+            let winners = dev_column_winners(session_records, dev_won);
             let deduped = dedup_devices(&device_groups[si]);
-            let (devices, sensors) =
-                attribute_devices(&deduped, &parsed.developer_sensors, dev_won, &metrics);
+            let (devices, sensors) = attribute_devices(
+                &deduped, &parsed.developer_sensors, dev_won, &metrics, &readings,
+                &winners, &parsed.apps,
+            );
 
             activities.append(build_activity_dict(
                 py,
@@ -1741,5 +1870,89 @@ mod tests {
         }
     }
 
+    // ── Developer sensor attribution ─────────────────────────────────────
 
+    mod sensor_attribution {
+        use super::*;
+
+        fn sensor(uuid: &str, columns: &[&str]) -> DeveloperSensor {
+            DeveloperSensor {
+                manufacturer: uuid.into(),
+                product: uuid.into(),
+                uuid: uuid.into(),
+                columns: columns.iter().map(|c| c.to_string()).collect(),
+            }
+        }
+
+        fn strings(items: &[&str]) -> Vec<String> {
+            items.iter().map(|s| s.to_string()).collect()
+        }
+
+        #[test]
+        fn sensor_without_readings_is_dropped() {
+            // Fields declared in the Record definition but never written with
+            // a reading: the column exists in the schema, not in `readings`.
+            let (_, sensors) = attribute_devices(
+                &[], &[sensor("c2", &["stroke_rate"])], 0, &strings(&["stroke_rate"]), &[], &[], &[],
+            );
+            assert!(sensors.is_empty());
+        }
+
+        #[test]
+        fn sensor_is_credited_only_with_columns_it_read() {
+            // drag_factor is present and non-null (in `metrics`) but all zeros.
+            let (_, sensors) = attribute_devices(
+                &[],
+                &[sensor("c2", &["stroke_rate", "drag_factor"])],
+                0,
+                &strings(&["stroke_rate", "drag_factor"]),
+                &strings(&["stroke_rate"]),
+                &[],
+                &[],
+            );
+            assert_eq!(sensors.len(), 1);
+            assert_eq!(sensors[0].columns, vec!["stroke_rate".to_string()]);
+        }
+
+        #[test]
+        fn shared_field_name_goes_to_the_app_that_supplied_the_readings() {
+            // Both apps registered `Power`; slot 0 (stryd) supplied the readings.
+            let apps = strings(&["stryd", "c2"]);
+            let (_, sensors) = attribute_devices(
+                &[],
+                &[sensor("stryd", &["power"]), sensor("c2", &["power"])],
+                1, // developer power won the merge
+                &strings(&["power"]),
+                &strings(&["power"]),
+                &[("power", 0)],
+                &apps,
+            );
+            assert_eq!(sensors.len(), 1);
+            assert_eq!(sensors[0].uuid, "stryd");
+            assert_eq!(sensors[0].columns, vec!["power".to_string()]);
+        }
+
+        #[test]
+        fn winner_is_the_app_with_most_readings() {
+            let row = |power: i16, app: u8| RecordRow {
+                dev_power: Some(power),
+                dev_power_app: Some(app),
+                ..Default::default()
+            };
+            let records = vec![row(0, 1), row(250, 0), row(251, 0), row(0, 1)];
+            assert_eq!(dev_column_winners(&records, 1), vec![("power", 0)]);
+            // Standard power won the merge: power is not developer-sourced.
+            assert!(dev_column_winners(&records, 0).is_empty());
+        }
+
+        #[test]
+        fn reading_means_non_null_and_non_zero() {
+            assert!(!has_reading(&Int16Array::from(vec![None, Some(0), Some(0)])));
+            assert!(has_reading(&Int16Array::from(vec![None, Some(0), Some(24)])));
+            assert!(!has_reading(&Float64Array::from(vec![Some(0.0), None])));
+            assert!(has_reading(&Float64Array::from(vec![Some(0.5)])));
+            assert!(!has_reading(&StringArray::from(vec![None::<&str>, Some("")])));
+            assert!(has_reading(&StringArray::from(vec![Some("freestyle")])));
+        }
+    }
 }

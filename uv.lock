@@ -1378,7 +1378,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "duckdb", marker = "extra == 'scripts'" },
+    { name = "duckdb", marker = "extra == 'scripts'", specifier = ">=1.1" },
     { name = "httpx", marker = "extra == 'scripts'" },
     { name = "matplotlib", marker = "extra == 'scripts'" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.5" },

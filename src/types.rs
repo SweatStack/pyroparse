@@ -197,8 +197,9 @@ fn read_raw_i64(data: &[u8], bt: BaseType, big_endian: bool) -> Option<i64> {
     }
 }
 
-/// Read a raw float value from FIT bytes.
-fn read_raw_f64(data: &[u8], bt: BaseType, big_endian: bool) -> Option<f64> {
+/// Read a raw float value from FIT bytes. Integer base types are read as
+/// integers and widened, so any numeric field can be decoded through here.
+pub(crate) fn read_raw_f64(data: &[u8], bt: BaseType, big_endian: bool) -> Option<f64> {
     match bt {
         BaseType::Float32 => {
             if data.len() < 4 { return None; }

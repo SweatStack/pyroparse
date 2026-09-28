@@ -164,13 +164,16 @@ Canonical extras (like `core_temperature`, `smo2`) are included automatically wh
 
 ## Test fixtures
 
-Three FIT files in `tests/fixtures/`:
+Real recordings in `tests/fixtures/`. The main ones:
 
 | File | Description | Key properties |
 |------|-------------|----------------|
 | `test.fit` | Standard cycling activity | 21,666 rows, 6 laps, HR/power/speed/cadence/GPS |
 | `with-developer-fields.fit` | Running with Stryd + CORE + Moxy | Developer fields, device merging, smo2 |
 | `cycling-rowing-cycling-rowing.fit` | Multi-session brick | 4 activities, per-session power attribution |
+| `cycling-running-rapid-9session.fit` | 9 alternating sessions (sweatstack `multisport2.fit`) | Record assignment, one UTC offset for every session |
+| `running-stryd-concept2.fit` | Run with Stryd and an idle Concept2 data field (sweatstack `short-run.fit`) | Two apps register `Power`; readings beat placeholders |
+| `zwift-relative-local-timestamp.fit` | Zwift virtual ride (sweatstack `weird-timezone.fit`) | `local_timestamp = 0`, so no local start time |
 
 Session-scoped fixtures in `conftest.py` parse each file once per test run:
 
@@ -179,3 +182,7 @@ Session-scoped fixtures in `conftest.py` parse each file once per test run:
 - `multi_session` / `multi_session_all` — cycling-rowing-cycling-rowing.fit
 
 Use these for read-only assertions. Use the path fixtures (`fit_path`, `dev_fields_path`, `multi_session_path`) when you need to call `load_fit()` with custom arguments.
+
+### Synthetic fixtures
+
+`tests/fit_builder.py` assembles a FIT file from explicit definition and data messages (little-endian, single section). Use it to pin down *spec* behaviour on exact byte layouts that no recording happens to exercise — developer field base types and scale/offset, message ordering, sentinel values, apps that share a field name — and keep real recordings for real-world behaviour. See `tests/test_developer_field_types.py`, `tests/test_local_time.py`, and `tests/test_ciq_devices.py` for the pattern.

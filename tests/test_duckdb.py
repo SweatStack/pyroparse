@@ -15,8 +15,10 @@ class TestScanFit:
         assert hasattr(result, "fetchdf")
 
     def test_row_count(self):
+        # One row per single-session activity fixture; multi-session and course
+        # files are skipped. Kept in sync with test_batch.N_ACTIVITY_FIXTURES.
         df = ppdb.scan_fit(str(FIXTURES)).fetchdf()
-        assert len(df) == 2
+        assert len(df) == 11
 
     def test_sql_filter(self):
         con = duckdb.connect()

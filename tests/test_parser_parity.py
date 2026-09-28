@@ -18,6 +18,8 @@ FIXTURE_FILES = [
     ("with-developer-fields.fit", 1),
     ("cycling-rowing-cycling-rowing.fit", 4),
     ("cycling-running-rapid-9session.fit", 9),
+    ("running-stryd-concept2.fit", 1),
+    ("zwift-relative-local-timestamp.fit", 1),
 ]
 
 
@@ -109,25 +111,27 @@ class TestDeviceParity:
 
 
 class TestDeveloperSensorParity:
-    """Both parsers must detect the same CIQ developer sensors."""
+    """The scanner sees CIQ app *registrations* (DeveloperDataId and
+    FieldDescription messages); the full parser lists an app only once it has
+    read a reading from it. So the scanner's sensor set is a superset of the
+    full parser's — equal whenever every registered app wrote data."""
 
     @pytest.mark.parametrize("filename,expected_count", FIXTURE_FILES)
-    def test_sensor_count(self, filename, expected_count):
+    def test_scanner_sensors_are_a_superset(self, filename, expected_count):
         full, scan = _parse_both(filename)
-        f_sensors = full[0]["metadata"]["developer_sensors"]
-        s_sensors = scan[0]["metadata"]["developer_sensors"]
-        assert len(f_sensors) == len(s_sensors), (
-            f"{filename}: developer sensor count mismatch"
-        )
+        for i in range(len(full)):
+            f_names = {s["manufacturer"] for s in full[i]["metadata"]["developer_sensors"]}
+            s_names = {s["manufacturer"] for s in scan[i]["metadata"]["developer_sensors"]}
+            assert f_names <= s_names, (
+                f"{filename} activity {i}: full parser lists sensors the scanner "
+                f"never registered: {f_names - s_names}"
+            )
 
-    @pytest.mark.parametrize("filename,expected_count", FIXTURE_FILES)
-    def test_sensor_manufacturers(self, filename, expected_count):
-        full, scan = _parse_both(filename)
+    def test_equal_when_every_app_wrote_data(self):
+        full, scan = _parse_both("test.fit")
         f_names = sorted(s["manufacturer"] for s in full[0]["metadata"]["developer_sensors"])
         s_names = sorted(s["manufacturer"] for s in scan[0]["metadata"]["developer_sensors"])
-        assert f_names == s_names, (
-            f"{filename}: developer sensor names mismatch ({f_names} vs {s_names})"
-        )
+        assert f_names == s_names
 
 
 class TestMetricsParity:

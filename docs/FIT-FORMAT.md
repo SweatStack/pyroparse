@@ -447,6 +447,10 @@ timezone offset can be derived:
 tz_offset_seconds = local_timestamp - timestamp
 ```
 
+`local_timestamp` is the local twin of the *same message's* `timestamp`. In
+the Activity message that is the end of the activity, so it is not a local
+start time: apply `tz_offset_seconds` to `session.start_time` instead.
+
 ### Timestamp resolution
 
 FIT timestamps have **1-second resolution** in the base format. Sub-second
@@ -566,8 +570,10 @@ Two message types register developer fields:
   messages
 - Field 2: `fit_base_type_id` — base type for decoding the raw bytes
 - Field 3: `field_name` — string name of the field (max 64 bytes)
-- Field 6: `units` — string units (max 16 bytes)
-- Field 8: `native_field_num` — if set, this developer field is considered
+- Field 6: `scale` (uint8) and Field 7: `offset` (sint8) — applied to the
+  decoded value as `raw / scale - offset`, like profile scale/offset
+- Field 8: `units` — string units (max 16 bytes)
+- Field 15: `native_field_num` — if set, this developer field is considered
   equivalent to the corresponding native field number
 
 **native_field_num caveat:** When a developer field overrides a native field,
@@ -999,7 +1005,8 @@ One per activity (or per sport in multi-sport files).
 | 7 | total_elapsed_time | uint32 | 1000 | s |
 | 8 | total_timer_time | uint32 | 1000 | s |
 | 9 | total_distance | uint32 | 100 | m |
-| 253 | local_timestamp | uint32 | 1 | s |
+
+The session message has no local-time field; see [activity](#activity-global-34).
 
 ### device_info (global #23)
 
@@ -1076,6 +1083,15 @@ Top-level container. One per file, summarizes session count.
 | 253 | timestamp | uint32 | 1 | s |
 | 5 | local_timestamp | uint32 | 1 | s |
 | 1 | num_sessions | uint16 | — | — |
+
+`local_timestamp` pairs with this message's own `timestamp` — the end of the
+activity — and is the only local-time field in an activity file (neither
+`session` nor `lap` has one). The UTC offset is `local_timestamp − timestamp`;
+apply it to `session.start_time` for a local start time. Using
+`local_timestamp` as a start time directly is wrong by the activity's
+duration. A truncated file may lack the Activity message entirely, and some
+writers (Zwift) store a relative `local_timestamp` below `date_time.min`; in
+both cases the offset is unknown.
 
 ## 25. Pool-swim distance reconstruction
 

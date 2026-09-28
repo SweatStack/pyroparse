@@ -266,6 +266,8 @@ class ActivityMetadata:
     extra: dict                     # sub_sport, anything format-specific
 ```
 
+`start_time_local` comes from the FIT Activity message, which records the activity's end in both UTC and local time; the difference is applied to the session start. It is `None` when a file has no Activity message (for example a truncated recording). Connect IQ apps that wrote data appear in `devices` with `device_type="developer"`; an installed app that never wrote a reading (only nulls or zeros) is not listed.
+
 The `extra` dict holds format- or sport-specific fields that don't earn a top-level attribute: `sub_sport` (e.g. `"lap_swimming"`), and — for pool swims — `pool_length` (metres) and `reconstructed_columns` (which record columns were derived from Length messages rather than measured; see [Swimming](#swimming)).
 
 Manual overrides merge on top of file-native values. A `sport` override is

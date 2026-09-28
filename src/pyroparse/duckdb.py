@@ -10,7 +10,8 @@ Usage::
     data = ppdb.load_fit(paths, columns=["timestamp", "power"])
     data.filter("power > 300").fetchdf()
 
-Requires ``duckdb`` to be installed.
+Requires ``duckdb >= 1.1``, where ``duckdb.default_connection()`` is a function
+(it was a module attribute in 1.0).
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ def scan_fit(
         DuckDB connection. Uses the default connection if ``None``.
     """
     if con is None:
-        con = duckdb.default_connection
+        con = duckdb.default_connection()
     table = pyroparse.scan_fit(path, recursive=recursive, errors=errors)
     return con.from_arrow(table)
 
@@ -80,7 +81,7 @@ def scan_parquet(
         DuckDB connection. Uses the default connection if ``None``.
     """
     if con is None:
-        con = duckdb.default_connection
+        con = duckdb.default_connection()
     table = pyroparse.scan_parquet(path, recursive=recursive, errors=errors)
     return con.from_arrow(table)
 
@@ -107,6 +108,6 @@ def load_fit(
         DuckDB connection. Uses the default connection if ``None``.
     """
     if con is None:
-        con = duckdb.default_connection
+        con = duckdb.default_connection()
     table = pyroparse.load_fit_batch(paths, columns=columns, errors=errors)
     return con.from_arrow(table)
