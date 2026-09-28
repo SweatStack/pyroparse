@@ -16,7 +16,7 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
-## [Unreleased]
+## [0.8.0] - 2026-09-28
 
 ### Fixed
 - **`start_time_local` was the local *end* time.** The FIT Activity message pairs its own `timestamp` (the end of the activity) with `local_timestamp`; pyroparse used the latter directly as the start, so every local start time was late by the activity's duration. The UTC offset (`local_timestamp − timestamp`) is now applied to the session `start_time`. Local times also resolve for summary-first files (Activity before Session), which previously got none.
