@@ -16,7 +16,7 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
-## [Unreleased]
+## [0.10.0] - 2026-10-08
 
 ### Changed
 - **`Device.product` is a key, and the file's free text moved to the new `product_name`.** `product` is the FIT profile's enum name for the product (`hrm_pro`, `edge_1030_plus`, `assioma_duo`), else the raw product number as a string (`"4614"`), which identifies a product only together with `manufacturer`. **Breaking**, three ways: a device whose file carries a `product_name` no longer has that text in `product` (`HRM-Pro:620385` → `hrm_pro`); enum names keep their underscores (`hrm pro` → `hrm_pro`); and a device whose product the profile does not name now has its number instead of `None`. Connect IQ apps have no `product`; their label (`CORE`, `Concept2`) or UUID is their `product_name`, and an unknown app's `manufacturer` is `None` instead of its UUID.
