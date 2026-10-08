@@ -14,7 +14,7 @@ use arrow::datatypes::DataType;
 
 use crate::fit::binary::{FitEvent, FitReader, MessageDef};
 use crate::fit::profile::{self, BaseType};
-use crate::reference::{classify_developer_field, format_product_name};
+use crate::reference::classify_developer_field;
 use crate::fields::{normalize_field_name, is_canonical_column, is_handled_field};
 use crate::types::{TypedColumn, promote_type, base_type_to_arrow, field_arrow_type, read_raw_f64};
 use crate::{
@@ -189,7 +189,8 @@ pub fn scan_metadata(data: &[u8]) -> Result<ScanResult, String> {
                         }
                     }
                     profile::MESG_DEVICE_INFO => {
-                        if let Some(d) = decode_device(def, field_bytes) {
+                        if let Some(mut d) = decode_device(def, field_bytes) {
+                            d.last_seen = result.devices.len();
                             result.devices.push(d);
                         }
                     }
@@ -374,51 +375,27 @@ pub(crate) fn resolve_local_start_times(sessions: &mut [SessionMeta], offsets: &
     }
 }
 
+/// Decode a DeviceInfo message (global 23). The metadata scan and the full
+/// parse share this decoder, so both report the same devices. Values are kept
+/// as the file writes them; naming happens after re-emissions are merged (see
+/// `DeviceMeta::product_key`).
 fn decode_device(def: &MessageDef, field_bytes: &[u8]) -> Option<DeviceMeta> {
-    let mut d = DeviceMeta::default();
     let be = def.big_endian;
-
+    let mut d = DeviceMeta::default();
     for (num, data) in FieldIter::new(def, field_bytes) {
         match num {
-            0 => {
-                // device_index (uint8)
-                if let Some(v) = read_u8_valid(data) {
-                    d.device_index = Some(v);
-                }
-            }
-            1 => {
-                // device_type / ant_device_type (uint8)
-                if let Some(v) = read_u8_valid(data) {
-                    d.ant_device_type = Some(v);
-                }
-            }
-            2 => {
-                // manufacturer (uint16)
-                if let Some(v) = read_u16(data, be) {
-                    d.manufacturer = Some(profile::manufacturer_name(v).to_string());
-                }
-            }
-            3 => {
-                // serial_number (uint32z — invalid is 0, not 0xFFFFFFFF)
-                if let Some(v) = read_u32z(data, be) {
-                    d.serial_number = Some(format!("{v}"));
-                }
-            }
-            27 => {
-                // product_name (string)
-                if let Some(s) = read_string(data) {
-                    d.product = Some(s);
-                }
-            }
+            0 => d.device_index = read_u8_valid(data),
+            1 => d.device_type = read_u8_valid(data),
+            2 => d.manufacturer = read_u16(data, be),
+            // serial_number is uint32z: zero is the invalid value.
+            3 => d.serial_number = read_u32z(data, be).map(|v| v.to_string()),
+            4 => d.product = read_u16(data, be),
+            25 => d.source_type = read_u8_valid(data),
+            27 => d.product_name = read_string(data),
             _ => {}
         }
     }
-
-    if d.manufacturer.is_some() || d.product.is_some() {
-        Some(d)
-    } else {
-        None
-    }
+    (d.manufacturer.is_some() || d.product.is_some() || d.product_name.is_some()).then_some(d)
 }
 
 fn decode_developer_data_id(def: &MessageDef, field_bytes: &[u8]) -> Option<(u8, String)> {
@@ -546,6 +523,17 @@ fn register_field_owner(
             .or_default()
             .insert(uuid.clone());
     }
+}
+
+/// SmO2 (muscle-oxygen saturation, %) as a reading, or `None` for "no
+/// reading". Muscle-oxygen sensors write 0 when they have no signal: the ANT+
+/// muscle-oxygen profile has its own "no reading" codes, and devices and
+/// Connect IQ apps map them to 0 on the way into the file rather than to the
+/// FIT invalid value. A saturation of 0 % is physiologically impossible, so 0
+/// is a sentinel, not a measurement. Applies to the native field and to
+/// developer fields alike.
+fn smo2_reading(percent: f32) -> Option<f32> {
+    (percent != 0.0).then_some(percent)
 }
 
 /// Store a developer-sourced value, preferring a reading over a zero
@@ -793,7 +781,8 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                         }
                     }
                     profile::MESG_DEVICE_INFO => {
-                        if let Some(d) = decode_device_full(def, field_bytes) {
+                        if let Some(mut d) = decode_device(def, field_bytes) {
+                            d.last_seen = devices.len();
                             devices.push(d);
                         }
                     }
@@ -1007,9 +996,7 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                     }
                 }
                 57 if field_mask[57] => {
-                    if let Some(v) = read_u16(data, be) {
-                        row.smo2 = Some(v as f32 / 10.0);
-                    }
+                    row.smo2 = read_u16(data, be).and_then(|v| smo2_reading(v as f32 / 10.0));
                 }
                 139 if field_mask[139] => {
                     if let Some(v) = read_u16(data, be) {
@@ -1332,78 +1319,6 @@ fn read_i32(data: &[u8], big_endian: bool) -> Option<i32> {
     if v == 0x7FFFFFFF { None } else { Some(v) }
 }
 
-/// Decode DeviceInfo with full field set (including garmin_product fallback).
-fn decode_device_full(def: &MessageDef, field_bytes: &[u8]) -> Option<DeviceMeta> {
-    let mut d = DeviceMeta::default();
-    let be = def.big_endian;
-    let mut garmin_product: Option<String> = None;
-
-    for (num, data) in FieldIter::new(def, field_bytes) {
-        match num {
-            0 => {
-                if let Some(v) = read_u8_valid(data) {
-                    d.device_index = Some(v);
-                }
-            }
-            1 => {
-                // device_type / ant_device_type
-                if let Some(v) = read_u8_valid(data) {
-                    d.ant_device_type = Some(v);
-                }
-            }
-            2 => {
-                // manufacturer
-                if let Some(v) = read_u16(data, be) {
-                    d.manufacturer = Some(profile::manufacturer_name(v).to_string());
-                }
-            }
-            3 => {
-                // serial_number (uint32z)
-                if let Some(v) = read_u32z(data, be) {
-                    d.serial_number = Some(format!("{v}"));
-                }
-            }
-            4 => {
-                // product (uint16) — resolve as garmin_product only when
-                // manufacturer is garmin (1 or 2). This matches fitparser's
-                // subfield resolution.
-                if d.product.is_none() {
-                    if let Some(v) = read_u16(data, be) {
-                        let name = profile::garmin_product_name(v);
-                        if name != "unknown" && !name.chars().all(|c| c.is_ascii_digit()) {
-                            garmin_product = Some(format_product_name(name));
-                        }
-                    }
-                }
-            }
-            27 => {
-                // product_name (string)
-                if let Some(s) = read_string(data) {
-                    d.product = Some(s);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Fallback: use garmin_product if no product_name and manufacturer is garmin.
-    // Field 4 (product) is a generic uint16; it only resolves to a meaningful
-    // garmin_product name when the manufacturer is actually garmin.
-    if d.product.is_none() && garmin_product.is_some() {
-        let is_garmin = d.manufacturer.as_deref()
-            .is_some_and(|m| m == "garmin");
-        if is_garmin {
-            d.product = garmin_product;
-        }
-    }
-
-    if d.manufacturer.is_some() || d.product.is_some() {
-        Some(d)
-    } else {
-        None
-    }
-}
-
 /// Decode a Lap message into a LapBoundary.
 fn decode_lap(def: &MessageDef, field_bytes: &[u8]) -> Option<LapBoundary> {
     let be = def.big_endian;
@@ -1530,7 +1445,9 @@ fn decode_record_dev_fields(
             }
             "Current Saturated Hemoglobin Percent" | "SmO2" | "smo2"
             | "saturated_hemoglobin_percent" => {
-                take_reading(&mut row.smo2, &mut row.smo2_app, value as f32, from);
+                if let Some(v) = smo2_reading(value as f32) {
+                    take_reading(&mut row.smo2, &mut row.smo2_app, v, from);
+                }
             }
             _ => {}
         }

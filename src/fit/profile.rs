@@ -6273,8 +6273,6 @@ pub fn antplus_device_type_name(val: u8) -> &'static str {
     }
 }
 
-// WARNING: enum type 'device_type' not found in Types sheet
-
 /// Map source_type numeric value to its string name.
 pub fn source_type_name(val: u8) -> &'static str {
     match val {
@@ -6708,4 +6706,78 @@ pub fn course_point_name(val: u8) -> &'static str {
         53 => "info",
         _ => "unknown",
     }
+}
+
+/// Map ble_device_type numeric value to its string name.
+pub fn ble_device_type_name(val: u8) -> &'static str {
+    match val {
+        0 => "connected_gps",
+        1 => "heart_rate",
+        2 => "bike_power",
+        3 => "bike_speed_cadence",
+        4 => "bike_speed",
+        5 => "bike_cadence",
+        6 => "footpod",
+        7 => "bike_trainer",
+        _ => "unknown",
+    }
+}
+
+/// Map local_device_type numeric value to its string name.
+pub fn local_device_type_name(val: u8) -> &'static str {
+    match val {
+        0 => "gps",
+        1 => "glonass",
+        2 => "gps_glonass",
+        3 => "accelerometer",
+        4 => "barometer",
+        5 => "temperature",
+        10 => "whr",
+        12 => "sensor_hub",
+        _ => "unknown",
+    }
+}
+
+/// Map favero_product numeric value to its string name.
+pub fn favero_product_name(val: u16) -> &'static str {
+    match val {
+        10 => "assioma_uno",
+        12 => "assioma_duo",
+        _ => "unknown",
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Subfield resolution
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `device_info.device_type` (field 1) named through its subfields,
+/// which apply according to `source_type`:
+/// `ble_device_type` when source_type is bluetooth_low_energy.
+/// `antplus_device_type` when source_type is antplus.
+/// `local_device_type` when source_type is local.
+/// (`ant_device_type`, when source_type is ant, is a plain uint8.)
+/// `None` when no enum subfield applies or its enum does not name the value.
+pub fn device_info_device_type_name(source_type: u8, val: u8) -> Option<&'static str> {
+    let name = match source_type {
+        3 => ble_device_type_name(val),
+        1 => antplus_device_type_name(val),
+        5 => local_device_type_name(val),
+        _ => return None,
+    };
+    (name != "unknown").then_some(name)
+}
+
+/// `device_info.product` (field 4) named through its subfields,
+/// which apply according to `manufacturer`:
+/// `favero_product` when manufacturer is favero_electronics.
+/// `garmin_product` when manufacturer is garmin, dynastream, dynastream_oem, tacx.
+/// `None` when no enum subfield applies or its enum does not name the value.
+pub fn device_info_product_name(manufacturer: u16, val: u16) -> Option<&'static str> {
+    let name = match manufacturer {
+        263 => favero_product_name(val),
+        1 | 15 | 13 | 89 => garmin_product_name(val),
+        _ => return None,
+    };
+    (name != "unknown").then_some(name)
 }

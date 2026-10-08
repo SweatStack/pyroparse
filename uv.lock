@@ -841,11 +841,11 @@ wheels = [
 
 [[package]]
 name = "open-sport-taxonomy"
-version = "0.10.0"
+version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/85/64/8b1d21077bc45a8f56d4df1decda5543b374858375d3473ff401ddcb37ea/open_sport_taxonomy-0.10.0.tar.gz", hash = "sha256:f5de512321fc0a8aa5d6cc4664b5a3a43fc6bea3ab9863fedcb7f71772874239", size = 21920, upload-time = "2026-06-12T17:48:23.141Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/72/8acdd68e4e2a03de176db4700463d0db9c2b081e07b74a05228394e231d3/open_sport_taxonomy-0.11.0.tar.gz", hash = "sha256:5bf8774e04f35bfbb2ad3514bc090bbe8342137ef4fcd2185829b5d9ecd64ac6", size = 21929, upload-time = "2026-08-12T12:33:09.705Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/9e/e750931c6dda8b8512fe0cc126b6e7df7e0c1f7c7dd86fad3bb156105348/open_sport_taxonomy-0.10.0-py3-none-any.whl", hash = "sha256:eb20ef5228e280e3eee1687c6dceece6a9bbdc2df2f3920dadbe9d0ed0b257f7", size = 24552, upload-time = "2026-06-12T17:48:21.836Z" },
+    { url = "https://files.pythonhosted.org/packages/16/d6/4ec4e7474061f2605695bc50a96e095a78a6605e9fb2c7955c16edfd9adc/open_sport_taxonomy-0.11.0-py3-none-any.whl", hash = "sha256:94bd9ba527f5bfc4a1cacbd16e97953a3122e03d60e9f567b9b5fbde9055f91a", size = 24555, upload-time = "2026-08-12T12:33:08.565Z" },
 ]
 
 [[package]]
@@ -1382,7 +1382,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'scripts'" },
     { name = "matplotlib", marker = "extra == 'scripts'" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.5" },
-    { name = "open-sport-taxonomy", specifier = ">=0.10,<0.11" },
+    { name = "open-sport-taxonomy", specifier = ">=0.10,<0.12" },
     { name = "polars", marker = "extra == 'scripts'" },
     { name = "pyarrow", specifier = ">=14.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },

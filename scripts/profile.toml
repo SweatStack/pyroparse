@@ -28,6 +28,15 @@ include = [
     "field_description",
 ]
 
+[subfields]
+# Fields whose meaning depends on another field of the same message. Each gets
+# a fn {message}_{field}_name(reference, val) -> Option<&'static str>, built from
+# the profile's subfield rows; the enums those subfields use are generated too.
+include = [
+    "device_info.device_type", # antplus_/ble_/local_device_type by source_type
+    "device_info.product",     # garmin_product, favero_product by manufacturer
+]
+
 [enums]
 # Enum types to generate name-mapping functions for.
 # Each gets: a fn {name}_name(val) -> &'static str.
@@ -37,7 +46,6 @@ include = [
     "manufacturer",
     "garmin_product",
     "antplus_device_type",
-    "device_type",             # alias: local_device_type in some SDK versions
     "source_type",
     "event",
     "event_type",

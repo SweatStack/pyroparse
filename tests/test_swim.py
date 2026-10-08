@@ -13,11 +13,16 @@ Fixtures (deterministically selected, one per integration shape):
   swimming-open-water.fit no lengths, measured distance (gate-off)
 """
 
+from pathlib import Path
+
 import pyarrow as pa
 import pyarrow.compute as pc
+import pytest
 
 from pyroparse import Activity
 from pyroparse._schema import STANDARD_COLUMNS
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _column_is_sorted(chunked) -> bool:
@@ -53,28 +58,30 @@ class TestReconstructedDistance:
 
 
 class TestReconstructedPace:
-    """Speed and cadence are reconstructed as per-length constants: present on
-    active-length rows, null while resting."""
+    """Speed and cadence are per-length constants: the length's averages while
+    swimming, 0 while resting at the wall (a rest is a stop, see AGENTS.md), and
+    null only before the first length, which no Length message describes. The
+    per-length values are checked against the file in TestPerLengthAgreement."""
 
-    def test_speed_present_on_active_rows(self, pool_swim):
-        speed = pool_swim.data["speed"]
-        assert speed.null_count > 0  # idle/warmup rows are null
-        assert speed.length() - speed.null_count > 0  # active rows are populated
+    def test_rests_are_zero_not_null(self, pool_swim):
+        # swimming-pool.fit has 7 idle lengths.
+        assert 0.0 in pool_swim.data["speed"].to_pylist()
+        assert 0 in pool_swim.data["cadence"].to_pylist()
 
     def test_cadence_present_on_active_rows(self, pool_swim):
         cadence = pool_swim.data["cadence"]
-        assert cadence.length() - cadence.null_count > 0
+        assert pc.max(cadence).as_py() > 0
 
-    def test_speed_and_cadence_share_active_rows(self, pool_swim):
-        # Both are driven by the same active lengths, so they cover the same rows.
+    def test_speed_and_cadence_share_null_rows(self, pool_swim):
+        # Both come from the same lengths, so they are null on the same rows.
         speed = pool_swim.data["speed"]
         cadence = pool_swim.data["cadence"]
         assert speed.null_count == cadence.null_count
 
-    def test_speed_is_positive_where_present(self, pool_swim):
+    def test_speed_is_never_negative(self, pool_swim):
         speed = pool_swim.data["speed"]
-        present = pc.drop_null(speed)
-        assert pc.min(present).as_py() > 0.0
+        assert pc.min(speed).as_py() == 0.0
+        assert pc.max(speed).as_py() > 0.0
 
 
 class TestLengthColumn:
@@ -191,3 +198,40 @@ class TestParquetRoundTrip:
             "distance", "speed", "cadence",
         ]
         assert restored.metadata.extra["pool_length"] == 25.0
+
+
+class TestPerLengthAgreement:
+    """Every record's reconstructed ``speed`` and ``cadence`` are its pool
+    length's own averages, as the Length message states them: ``avg_speed``
+    and ``avg_swimming_cadence`` on an active length, 0 on a rest."""
+
+    @staticmethod
+    def _lengths(path):
+        from pyroparse import all_messages
+
+        lengths = [
+            {f["name"]: f["value"] for f in m["fields"]}
+            for m in all_messages(path)
+            if m["kind"] == "length"
+        ]
+        return sorted(lengths, key=lambda m: m["start_time"])
+
+    @pytest.mark.parametrize("fixture", ["swimming-pool.fit", "swimming-pool-50m.fit"])
+    def test_records_carry_their_length_averages(self, fixture):
+        path = FIXTURES / fixture
+        lengths = self._lengths(path)
+        table = Activity.load_fit(path, extra_columns=["length"]).data
+        rows = zip(*(table.column(c).to_pylist() for c in ("length", "speed", "cadence")))
+        checked = 0
+        for index, speed, cadence in rows:
+            if index is None:  # before the first length
+                continue
+            length = lengths[index]
+            if length["length_type"] == "active":
+                assert speed == pytest.approx(length["avg_speed"], abs=0.001)
+                assert cadence == length["avg_swimming_cadence"]
+            else:
+                assert speed == 0.0
+                assert cadence == 0
+            checked += 1
+        assert checked > 0.9 * table.num_rows

@@ -25,6 +25,7 @@ SINT16 = 0x83
 UINT16 = 0x84
 SINT32 = 0x85
 UINT32 = 0x86
+UINT32Z = 0x8C
 FLOAT32 = 0x88
 FLOAT64 = 0x89
 
@@ -32,6 +33,7 @@ FLOAT64 = 0x89
 FILE_ID = 0
 SESSION = 18
 RECORD = 20
+DEVICE_INFO = 23
 ACTIVITY = 34
 FIELD_DESCRIPTION = 206
 DEVELOPER_DATA_ID = 207
@@ -47,6 +49,7 @@ _NUMERIC = {
     UINT16: ("H", 0xFFFF),
     SINT32: ("i", 0x7FFFFFFF),
     UINT32: ("I", 0xFFFFFFFF),
+    UINT32Z: ("I", 0x00000000),
     FLOAT32: ("f", None),
     FLOAT64: ("d", None),
 }
@@ -150,11 +153,23 @@ def file_id(b: FitBuilder, local: int) -> None:
     b.define(local, FILE_ID, [(0, ENUM, 1), (1, UINT16, 2)]).data(local, [4, 1])
 
 
-def session(b: FitBuilder, local: int, start: datetime, elapsed_s: int, sport: int = 1) -> None:
+def session(
+    b: FitBuilder,
+    local: int,
+    start: datetime,
+    elapsed_s: int,
+    sport: int = 1,
+    sub_sport: int | None = None,
+) -> None:
     """Session with end ``timestamp``, ``start_time``, ``sport`` (1 = running),
-    and ``total_elapsed_time``."""
-    b.define(local, SESSION, [(253, UINT32, 4), (2, UINT32, 4), (5, ENUM, 1), (7, UINT32, 4)])
-    b.data(local, [fit_time(start) + elapsed_s, fit_time(start), sport, elapsed_s * 1000])
+    ``total_elapsed_time``, and ``sub_sport`` when given."""
+    fields = [(253, UINT32, 4), (2, UINT32, 4), (5, ENUM, 1), (7, UINT32, 4)]
+    values = [fit_time(start) + elapsed_s, fit_time(start), sport, elapsed_s * 1000]
+    if sub_sport is not None:
+        fields.append((6, ENUM, 1))
+        values.append(sub_sport)
+    b.define(local, SESSION, fields)
+    b.data(local, values)
 
 
 def activity(b: FitBuilder, local: int, end: datetime, utc_offset_s: int) -> None:
@@ -194,3 +209,31 @@ def field_description(
     ]
     b.define(local, FIELD_DESCRIPTION, fields)
     b.data(local, [dev_index, field_number, base_type, name, scale, offset, units])
+
+
+def device_info(
+    b: FitBuilder,
+    local: int,
+    index: int,
+    *,
+    manufacturer: int | None = None,
+    product: int | None = None,
+    serial: int | None = None,
+    product_name: str | None = None,
+    device_type: int | None = None,
+    source_type: int | None = None,
+) -> None:
+    """device_info: one emission of a device channel. ``device_type`` is read
+    per ``source_type`` (1 = antplus, 3 = bluetooth_low_energy, 5 = local).
+    ``None`` writes the field's invalid value."""
+    fields = [
+        (0, UINT8, 1),     # device_index
+        (1, UINT8, 1),     # device_type
+        (2, UINT16, 2),    # manufacturer
+        (3, UINT32Z, 4),   # serial_number
+        (4, UINT16, 2),    # product
+        (25, ENUM, 1),     # source_type
+        (27, STRING, 20),  # product_name
+    ]
+    b.define(local, DEVICE_INFO, fields)
+    b.data(local, [index, device_type, manufacturer, serial, product, source_type, product_name])

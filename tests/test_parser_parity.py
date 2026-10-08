@@ -92,22 +92,24 @@ class TestSessionParity:
 
 
 class TestDeviceParity:
-    """Both parsers must find the same device manufacturers.
+    """Both parsers decode DeviceInfo with one decoder and group it per session
+    the same way, so every activity lists the same devices. (The full parser
+    additionally attributes columns, which the scanner cannot see.)"""
 
-    Note: device counts may differ because the full parser applies
-    attribute_devices() + dedup_devices() while the scanner returns
-    raw DeviceInfo entries. We compare manufacturer sets.
-    """
+    @staticmethod
+    def _identities(activity):
+        return [
+            (d["device_index"], d["manufacturer"], d["product"], d["product_name"], d["serial_number"])
+            for d in activity["metadata"]["devices"]
+        ]
 
     @pytest.mark.parametrize("filename,expected_count", FIXTURE_FILES)
-    def test_device_manufacturer_sets(self, filename, expected_count):
+    def test_same_devices_per_activity(self, filename, expected_count):
         full, scan = _parse_both(filename)
-        f_mfrs = {d["manufacturer"] for a in full for d in a["metadata"]["devices"]}
-        s_mfrs = {d["manufacturer"] for a in scan for d in a["metadata"]["devices"]}
-        assert f_mfrs == s_mfrs, (
-            f"{filename}: device manufacturer sets differ. "
-            f"Full only: {f_mfrs - s_mfrs}, Scanner only: {s_mfrs - f_mfrs}"
-        )
+        for i in range(len(full)):
+            assert self._identities(full[i]) == self._identities(scan[i]), (
+                f"{filename} activity {i}: device lists differ"
+            )
 
 
 class TestDeveloperSensorParity:
@@ -120,8 +122,8 @@ class TestDeveloperSensorParity:
     def test_scanner_sensors_are_a_superset(self, filename, expected_count):
         full, scan = _parse_both(filename)
         for i in range(len(full)):
-            f_names = {s["manufacturer"] for s in full[i]["metadata"]["developer_sensors"]}
-            s_names = {s["manufacturer"] for s in scan[i]["metadata"]["developer_sensors"]}
+            f_names = {s["product_name"] for s in full[i]["metadata"]["developer_sensors"]}
+            s_names = {s["product_name"] for s in scan[i]["metadata"]["developer_sensors"]}
             assert f_names <= s_names, (
                 f"{filename} activity {i}: full parser lists sensors the scanner "
                 f"never registered: {f_names - s_names}"
@@ -129,8 +131,8 @@ class TestDeveloperSensorParity:
 
     def test_equal_when_every_app_wrote_data(self):
         full, scan = _parse_both("test.fit")
-        f_names = sorted(s["manufacturer"] for s in full[0]["metadata"]["developer_sensors"])
-        s_names = sorted(s["manufacturer"] for s in scan[0]["metadata"]["developer_sensors"])
+        f_names = sorted(s["product_name"] for s in full[0]["metadata"]["developer_sensors"])
+        s_names = sorted(s["product_name"] for s in scan[0]["metadata"]["developer_sensors"])
         assert f_names == s_names
 
 

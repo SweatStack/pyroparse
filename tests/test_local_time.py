@@ -6,10 +6,14 @@ the UTC offset, which pyroparse applies to the session ``start_time``. Sessions
 carry no local time of their own. See docs/FIT-FORMAT.md, "activity".
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from pyroparse import Activity, Session
+import pyarrow.parquet as pq
+import pytest
+
+from pyroparse import Activity, ActivityMetadata, Session
 
 from fit_builder import RECORD, UINT8, UINT32, FitBuilder, activity, file_id, fit_time, session
 
@@ -118,3 +122,37 @@ class TestRealFiles:
         cycling_activity.to_parquet(path)
         loaded = Activity.load_parquet(path).metadata
         assert loaded.start_time_local == cycling_activity.metadata.start_time_local
+
+
+class TestUtcOffset:
+    """``utc_offset`` is ``start_time_local - start_time`` in seconds, derived
+    from the two timestamps so it can never disagree with them."""
+
+    @pytest.mark.parametrize("offset_s", [7200, -5 * 3600])
+    def test_value(self, offset_s):
+        assert Activity.load_fit(_build(utc_offset_s=offset_s)).metadata.utc_offset == offset_s
+
+    def test_unknown_without_an_activity_message(self):
+        meta = Activity.load_fit(_build(utc_offset_s=7200, with_activity=False)).metadata
+        assert meta.utc_offset is None
+
+    def test_unknown_for_a_relative_local_timestamp(self):
+        meta = Activity.load_fit(FIXTURES / "zwift-relative-local-timestamp.fit").metadata
+        assert meta.utc_offset is None
+
+    def test_not_a_wall_clock_offset(self):
+        """Parquet written before 0.8 can hold a 1989 local time for a Zwift file."""
+        meta = ActivityMetadata(
+            start_time=datetime(2021, 3, 12, 15, 4, 54, tzinfo=timezone.utc),
+            start_time_local=datetime(1989, 12, 31),
+        )
+        assert meta.utc_offset is None
+
+    def test_serialized(self, tmp_path):
+        a = Activity.load_fit(_build(utc_offset_s=7200))
+        assert a.metadata.to_dict()["utc_offset"] == 7200
+        path = tmp_path / "a.parquet"
+        a.to_parquet(path)
+        stored = json.loads(pq.read_schema(path).metadata[b"pyroparse"])
+        assert stored["utc_offset"] == 7200
+        assert Activity.load_parquet(path).metadata.utc_offset == 7200

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Reference lookups — developer field classification, product name formatting
+// Reference lookups — developer field classification
 //
 // Sport, sub-sport, manufacturer, and ANT+ type mappings have moved to
 // the generated fit::profile module.
@@ -16,24 +16,9 @@ pub fn classify_developer_field(name: &str) -> Option<&'static str> {
     None
 }
 
-/// Clean a raw product name like "fenix6" or "hrm_pro" by replacing
-/// underscores and hyphens with spaces.  Preserves original casing.
-pub fn format_product_name(raw: &str) -> String {
-    raw.chars()
-        .map(|c| if c == '_' || c == '-' { ' ' } else { c })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn format_product_name_replaces_separators() {
-        assert_eq!(format_product_name("fenix6"), "fenix6");
-        assert_eq!(format_product_name("hrm_pro"), "hrm pro");
-        assert_eq!(format_product_name("hrm-pro-plus"), "hrm pro plus");
-    }
 
     #[test]
     fn classify_developer_field_core_temp() {

@@ -56,6 +56,16 @@ class ComponentDef:
 
 
 @dataclass
+class SubfieldDef:
+    """An alternative reading of a field, active when another field of the
+    same message (the reference field) holds one of ``ref_values``."""
+    name: str
+    field_type: str
+    ref_field: str
+    ref_values: list[str]
+
+
+@dataclass
 class FieldDef:
     number: int
     name: str
@@ -65,6 +75,7 @@ class FieldDef:
     units: str
     components: list[ComponentDef] = field(default_factory=list)
     accumulate: bool = False
+    subfields: list[SubfieldDef] = field(default_factory=list)
 
 
 @dataclass
@@ -127,6 +138,8 @@ def parse_messages_sheet(ws) -> dict[str, MessageDef]:
         units = row[8]
         bits = row[9]
         accumulate = row[10]
+        ref_field_names = row[11]
+        ref_field_values = row[12]
 
         # New message block.
         if msg_name:
@@ -134,9 +147,28 @@ def parse_messages_sheet(ws) -> dict[str, MessageDef]:
             messages[current.name] = current
             continue
 
-        # Skip subfield rows (no field number) — they share the parent's
-        # field number and only affect naming/enum resolution.
-        if not current or field_num is None or str(field_num).strip() == "":
+        if not current:
+            continue
+
+        # Subfield rows have no field number: they belong to the field above
+        # and say how to read it, given the value of a reference field.
+        if field_num is None or str(field_num).strip() == "":
+            if current.fields and field_name and ref_field_names:
+                refs = _split_list(ref_field_names)
+                values = _split_list(ref_field_values)
+                if len(refs) != len(values):
+                    raise ValueError(f"{current.name}.{field_name}: ref fields/values mismatch")
+                # One subfield row may list (ref field, value) pairs for several
+                # reference fields; keep them grouped per reference field.
+                for ref in dict.fromkeys(refs):
+                    current.fields[-1].subfields.append(
+                        SubfieldDef(
+                            name=str(field_name),
+                            field_type=str(field_type or ""),
+                            ref_field=ref,
+                            ref_values=[v for r, v in zip(refs, values) if r == ref],
+                        )
+                    )
             continue
 
         comps = _parse_components(components, bits, accumulate)
@@ -161,6 +193,11 @@ def parse_messages_sheet(ws) -> dict[str, MessageDef]:
 # ---------------------------------------------------------------------------
 # Parsing helpers
 # ---------------------------------------------------------------------------
+
+
+def _split_list(value) -> list[str]:
+    """Split a comma-separated Profile.xlsx cell into stripped items."""
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
 
 def _parse_int(value) -> int | None:
@@ -313,7 +350,16 @@ def generate_rust(
 
     sdk_version = config.get("sdk_version", "unknown")
     included_messages = config.get("messages", {}).get("include", [])
-    included_enums = config.get("enums", {}).get("include", [])
+    included_enums = list(config.get("enums", {}).get("include", []))
+    resolved = [
+        _resolved_field(path, all_messages, all_types)
+        for path in config.get("subfields", {}).get("include", [])
+    ]
+    # A resolved field needs its reference enum and every subfield enum.
+    for _msg, fdef, ref_enum in resolved:
+        for name in [ref_enum.name] + [sf.field_type for sf in fdef.subfields if sf.field_type in all_types]:
+            if name not in included_enums:
+                included_enums.append(name)
 
     # --- Header ---
     w(f'//! Auto-generated FIT profile from SDK {sdk_version}.')
@@ -520,8 +566,62 @@ def generate_rust(
         w(f"    }}")
         w(f"}}")
 
+    # --- Subfield resolvers ---
+    if resolved:
+        w("")
+        w("// ═══════════════════════════════════════════════════════════════════════════")
+        w("// Subfield resolution")
+        w("// ═══════════════════════════════════════════════════════════════════════════")
+    for msg, fdef, ref_enum in resolved:
+        ref_name = fdef.subfields[0].ref_field
+        ref_param = _rust_param_type(ref_enum.base_type)
+        val_param = _rust_param_type(fdef.field_type)
+        ref_numbers = {v.name: v.value for v in ref_enum.values}
+        w("")
+        named = [sf for sf in fdef.subfields if sf.field_type in all_types]
+        unnamed = [sf for sf in fdef.subfields if sf.field_type not in all_types]
+        w(f"/// `{msg.name}.{fdef.name}` (field {fdef.number}) named through its subfields,")
+        w(f"/// which apply according to `{ref_name}`:")
+        for sf in named:
+            w(f"/// `{sf.name}` when {ref_name} is {', '.join(sf.ref_values)}.")
+        for sf in unnamed:
+            w(f"/// (`{sf.name}`, when {ref_name} is {', '.join(sf.ref_values)}, is a plain {sf.field_type}.)")
+        w(f"/// `None` when no enum subfield applies or its enum does not name the value.")
+        w(f"pub fn {msg.name}_{fdef.name}_name({ref_name}: {ref_param}, val: {val_param}) -> Option<&'static str> {{")
+        w(f"    let name = match {ref_name} {{")
+        for sf in named:
+            arms = " | ".join(str(ref_numbers[v]) for v in sf.ref_values)
+            w(f"        {arms} => {sf.field_type}_name(val),")
+        w(f"        _ => return None,")
+        w(f"    }};")
+        w(f'    (name != "unknown").then_some(name)')
+        w(f"}}")
+
     w("")
     return "\n".join(lines)
+
+
+def _resolved_field(
+    path: str,
+    all_messages: dict[str, MessageDef],
+    all_types: dict[str, EnumType],
+) -> tuple[MessageDef, FieldDef, EnumType]:
+    """Look up a ``message.field`` listed under ``[subfields]`` and check that it
+    can be resolved: its subfields are keyed on one enum reference field, and at
+    least one of them is an enum (a plain-integer subfield names nothing)."""
+    msg_name, _, field_name = path.partition(".")
+    msg = all_messages[msg_name]
+    fdef = next(f for f in msg.fields if f.name == field_name)
+    if not fdef.subfields:
+        raise ValueError(f"{path} has no subfields")
+    ref_fields = {sf.ref_field for sf in fdef.subfields}
+    if len(ref_fields) != 1:
+        raise ValueError(f"{path}: subfields reference several fields {sorted(ref_fields)}")
+    if not any(sf.field_type in all_types for sf in fdef.subfields):
+        raise ValueError(f"{path}: no subfield is an enum")
+    (ref_name,) = ref_fields
+    ref_field = next(f for f in msg.fields if f.name == ref_name)
+    return msg, fdef, all_types[ref_field.field_type]
 
 
 def _rust_param_type(base_type: str) -> str:

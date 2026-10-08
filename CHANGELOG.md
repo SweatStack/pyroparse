@@ -16,6 +16,40 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
+## [Unreleased]
+
+### Changed
+- **`Device.product` is a key, and the file's free text moved to the new `product_name`.** `product` is the FIT profile's enum name for the product (`hrm_pro`, `edge_1030_plus`, `assioma_duo`), else the raw product number as a string (`"4614"`), which identifies a product only together with `manufacturer`. **Breaking**, three ways: a device whose file carries a `product_name` no longer has that text in `product` (`HRM-Pro:620385` → `hrm_pro`); enum names keep their underscores (`hrm pro` → `hrm_pro`); and a device whose product the profile does not name now has its number instead of `None`. Connect IQ apps have no `product`; their label (`CORE`, `Concept2`) or UUID is their `product_name`, and an unknown app's `manufacturer` is `None` instead of its UUID.
+- **`Device.name` is the manufacturer and product joined, without formatting**: `garmin hrm_pro`, `wahoo_fitness ELEMNT ROAM`, `favero_electronics assioma_duo`, `Concept2`. The product part is the enum name, else `product_name` verbatim; the manufacturer is left out when the product already starts with it. **Breaking:** the spelling changes wherever `product` does (`garmin hrm pro` → `garmin hrm_pro`, `garmin HRM-Pro:620385` → `garmin hrm_pro`), and so does the `device_name` column of `scan_fit`/`scan_parquet`.
+- **`metadata.metrics` ignores all-zero columns**, not only all-null ones: a sensor that was connected but idle, writing only zeros, did not record its metric. The columns themselves are unchanged. A column that is legitimately zero on every record (a temperature of exactly 0 °C throughout) drops out of `metrics` too.
+- **A file whose SmO2 is only zeros has no `smo2` column**, like any file without SmO2 (see Added).
+- **Pool-swim `speed` and `cadence` are 0 while resting at the wall**, not null. An idle Length message records a rest, and a rest is a stop. They stay null before the first length, which no Length message describes, and in a column the swim does not record (no pool length for speed, no stroke rate on any length for cadence). **Behavior change:** consumers that treated null as rest see 0; averages over a swim now include its rests, as for every other sport.
+
+### Fixed
+- **Sensors sharing a `device_index` are no longer dropped.** DeviceInfo messages were merged by index alone, so when a head unit handed an index to a different sensor mid-ride (Wahoo does: a power meter, then a heart-rate strap), the second sensor vanished. A message under a used index is now a re-emission only when no identity field (manufacturer, product, product name, serial number, device and source type) disagrees; otherwise it is a new device. A column goes to the matching device the head unit registered last.
+- **Product names for Tacx, Dynastream and Favero devices.** The profile reads `product` as a `garmin_product` for garmin, dynastream, dynastream_oem and tacx, and as a `favero_product` for favero_electronics; only Garmin was resolved. The resolution is now generated from the FIT profile.
+- **Bluetooth sensors are credited with their columns.** A channel's `device_type` was read as an ANT+ type even for Bluetooth sensors, which number the same sensors differently, so a Bluetooth heart-rate strap never received `heart_rate`. The type is now read per `source_type`, as the profile specifies. A Bluetooth value that is not a Bluetooth type is read as ANT+, since Wahoo head units write the ANT+ number (120 for heart rate) on Bluetooth channels; the two numberings do not overlap.
+- **A heart-rate strap is no longer credited with `power` by manufacturer.** A Wahoo TICKR next to a power meter could receive `power` because Wahoo also makes trainers; a sensor that declares its type is credited by type alone. The power fallback also listed `favero`, which is not a FIT manufacturer name, instead of `favero_electronics`.
+- **A paired foot pod is credited with what it measured** (ANT+ `stride_speed_distance`, Bluetooth `footpod`, such as an HRM-Pro's running channel), in running, walking and hiking sessions only: `cadence` always, `speed` and `distance` when the session has no GPS. With GPS the watch is credited, since the file does not record whether the runner chose the foot pod as speed source.
+- **`open_fit` lists the same devices as `load_fit`.** The metadata scan used its own DeviceInfo decoder, which read no product number and did not merge re-emissions.
+- `docs/FIT-FORMAT.md`: `device_info` field 25 is `source_type`, not `ant_device_number` (field 21).
+
+### Added
+- **`Device.product_name`**: the file's free-text product name (DeviceInfo field 27), verbatim. Often the head unit's own label for the sensor rather than the product's name.
+- **`ActivityMetadata.utc_offset`**: the UTC offset at the start in seconds (`start_time_local - start_time`), derived from the two so it cannot disagree with them; `None` when either is unknown or they are more than 24 hours apart. Included in `to_dict()` and the Parquet metadata.
+- **`pyroparse.__version__`**.
+- **An SmO2 of 0 decodes to null.** Muscle-oxygen sensors write 0 when they have no signal, and 0 % saturation is physiologically impossible; the native field and developer fields folded into `smo2` alike. Always on: this is decoding, not shaping. See [docs/FIT-FORMAT.md](docs/FIT-FORMAT.md), "Device sentinels".
+- **Indoor-rowing rests are 0.** A rowing monitor repeats the last stroke's power, rate and pace while the rower rests. In an `indoor_rowing` session with recorded distance, a run of more than 3 records in which `distance` advances by at most 1 cm is a rest, and `power`, `cadence` and `speed` are 0 there, whether the file held the last stroke or nothing: a rest is a stop, and 0 is what a head unit writes when you stop, so averages stay time-weighted and work and mean-max curves stay correct. A column the session never recorded stays null. `metadata.extra["cleaned_columns"]` lists the columns that changed. See the Rowing section of the README.
+
+### Build
+- **`open-sport-taxonomy>=0.10,<0.12`** (was `<0.11`); the lock resolves 0.11.0. The suite passes on both.
+- **The profile generator resolves subfields.** Fields listed under `[subfields]` in `scripts/profile.toml` get a resolver function generated from `Profile.xlsx`, and the enums they use are generated with them.
+
+### Documentation
+- AGENTS.md: when a rule about what a device meant belongs in the parse path, and why field readings come from the profile.
+- **Zero versus null is a documented rule** (AGENTS.md, "A stop is 0, missing is null"): a stop the file determines is 0 in every movement column the session records; null means no measurement exists. The rule lists every place it applies.
+
+
 ## [0.9.0] - 2026-09-28
 
 ### Changed

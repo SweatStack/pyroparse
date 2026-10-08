@@ -8,6 +8,7 @@ use std::io::Read;
 use std::sync::Arc;
 
 use fields::{is_canonical_column, normalize_field_name};
+use fit::profile;
 use types::TypedColumn;
 
 use arrow::array::{
@@ -44,24 +45,54 @@ fn count_nonzero_i16(records: &[RecordRow], accessor: impl Fn(&RecordRow) -> Opt
 struct ColumnAttribution {
     /// Column name in the output schema (e.g. "power").
     name: &'static str,
-    /// ANT+ device_type values that identify the standard-field source device.
-    ant_device_types: &'static [u8],
-    /// Manufacturers known to produce this metric (fallback when ANT+ device
-    /// type is absent — common for Bluetooth/ANT-FS fitness equipment).
+    /// Sensor types that produce this column: `device_info.device_type` names
+    /// (see `DeviceMeta::sensor_type`). ANT+ and BLE name the same sensors alike.
+    sensor_types: &'static [&'static str],
+    /// Manufacturers known to produce this metric: the fallback for channels
+    /// whose type does not say what they measure (fitness equipment, rowers).
+    /// FIT profile manufacturer names.
     known_manufacturers: &'static [&'static str],
+    /// When a paired foot pod produced this column (see `FootPod`).
+    foot_pod: FootPod,
     /// Whether this column can conflict with a developer field and needs the
     /// majority-wins merge logic.
     mergeable: bool,
 }
 
+/// Sensor types of a foot pod: ANT+ `stride_speed_distance`, BLE `footpod`.
+/// An HRM-Pro's running channel is one too, and it is registered in every
+/// sport, so a foot pod is a source only in on-foot sessions (`is_on_foot`).
+const FOOT_POD_TYPES: &[&str] = &["stride_speed_distance", "footpod"];
+
+/// When a paired foot pod produced a column, in an on-foot session.
+#[derive(Clone, Copy)]
+enum FootPod {
+    Never,
+    /// The watch prefers a foot pod over its wrist sensor (running cadence).
+    Always,
+    /// A foot pod is the source only without GPS (a treadmill, or GPS off).
+    /// With GPS the watch uses GPS unless the runner chose the foot pod as
+    /// speed source, a setting the file does not record: we then credit GPS.
+    WithoutGps,
+}
+
+/// FIT sports in which a foot pod measures.
+fn is_on_foot(session: Option<&SessionMeta>) -> bool {
+    matches!(
+        session.and_then(|s| s.sport.as_deref()),
+        Some("running" | "walking" | "hiking")
+    )
+}
+
 const COLUMN_ATTRIBUTIONS: &[ColumnAttribution] = &[
     ColumnAttribution {
         name: "power",
-        ant_device_types: &[11], // bike_power
+        sensor_types: &["bike_power"],
+        foot_pod: FootPod::Never,
         known_manufacturers: &[
             "concept2",
             "elite",
-            "favero",
+            "favero_electronics",
             "quarq",
             "rotor",
             "shimano",
@@ -76,37 +107,43 @@ const COLUMN_ATTRIBUTIONS: &[ColumnAttribution] = &[
     },
     ColumnAttribution {
         name: "cadence",
-        ant_device_types: &[121, 122], // bike_speed_cadence, stride_speed_distance
+        sensor_types: &["bike_speed_cadence", "bike_cadence"],
+        foot_pod: FootPod::Always,
         known_manufacturers: &[],
         mergeable: true,
     },
     ColumnAttribution {
         name: "heart_rate",
-        ant_device_types: &[120], // heart_rate monitor
+        sensor_types: &["heart_rate"],
+        foot_pod: FootPod::Never,
         known_manufacturers: &[],
         mergeable: false,
     },
     ColumnAttribution {
         name: "speed",
-        ant_device_types: &[123, 121], // bike_speed, bike_speed_cadence
+        sensor_types: &["bike_speed", "bike_speed_cadence"],
+        foot_pod: FootPod::WithoutGps,
         known_manufacturers: &[],
         mergeable: false,
     },
     ColumnAttribution {
         name: "temperature",
-        ant_device_types: &[25], // environment_sensor_legacy
+        sensor_types: &["env_sensor"],
+        foot_pod: FootPod::Never,
         known_manufacturers: &[],
         mergeable: false,
     },
     ColumnAttribution {
         name: "distance",
-        ant_device_types: &[],
+        sensor_types: &[],
+        foot_pod: FootPod::WithoutGps,
         known_manufacturers: &[],
         mergeable: false,
     },
     ColumnAttribution {
         name: "altitude",
-        ant_device_types: &[],
+        sensor_types: &[],
+        foot_pod: FootPod::Never,
         known_manufacturers: &[],
         mergeable: false,
     },
@@ -118,20 +155,22 @@ const COLUMN_ATTRIBUTIONS: &[ColumnAttribution] = &[
 
 #[derive(Clone)]
 pub(crate) struct DeveloperSensor {
-    pub(crate) manufacturer: String,
-    pub(crate) product: String,
+    /// The app's maker when it is a known app, else `None`.
+    pub(crate) manufacturer: Option<String>,
+    /// The app's label (`CORE`, `Concept2`), or its UUID for an unknown app.
+    pub(crate) product_name: String,
     /// CIQ application UUID; matches `ParseResult::apps` entries.
     pub(crate) uuid: String,
     pub(crate) columns: Vec<String>,
 }
 
-/// Known CIQ app UUIDs → (manufacturer, product).
+/// Known CIQ app UUIDs → (manufacturer, label).
 ///
 /// This is purely cosmetic — it gives human-readable names to developer
 /// sensors.  Unknown UUIDs still work; they just show the UUID as the name.
 /// To add a new sensor, add a row.
 const KNOWN_CIQ_APPS: &[(&str, &str, &str)] = &[
-    // (uuid, manufacturer, product)
+    // (uuid, manufacturer, label)
     ("6957fe68-83fe-4ed6-8613-413f70624bb5", "core", "CORE"),
     ("9a0508b9-0256-4639-88b3-a2690a14ddf9", "concept2", "Concept2"),
     ("18fb2cf0-1a4b-430d-ad66-988c847421f4", "stryd", "Stryd"),
@@ -152,18 +191,13 @@ pub(crate) fn bytes_to_uuid(bytes: &[u8]) -> Option<String> {
     ))
 }
 
-/// Look up a CIQ app UUID → (manufacturer, product).  Returns the UUID
-/// itself as both manufacturer and product for unknown apps.
-pub(crate) fn name_for_uuid(uuid: &str) -> (&str, &str) {
-    for &(u, mfr, product) in KNOWN_CIQ_APPS {
-        if u.eq_ignore_ascii_case(uuid) {
-            return (mfr, product);
-        }
-    }
-    // Leak the UUID string so we can return &str with 'static-like lifetime.
-    // This is fine — there are at most a handful of unknown UUIDs per file.
-    let leaked: &str = Box::leak(uuid.to_string().into_boxed_str());
-    (leaked, leaked)
+/// A CIQ app's identity: `(manufacturer, label)` for a known app, else no
+/// manufacturer and the UUID as the label.
+pub(crate) fn ciq_app_identity(uuid: &str) -> (Option<&'static str>, String) {
+    KNOWN_CIQ_APPS
+        .iter()
+        .find(|(u, _, _)| u.eq_ignore_ascii_case(uuid))
+        .map_or((None, uuid.to_string()), |&(_, mfr, label)| (Some(mfr), label.to_string()))
 }
 
 /// Map a developer field name to a fixed column, if it contributes to one.
@@ -228,10 +262,10 @@ pub(crate) fn classify_developer_sensors(
     app_columns
         .into_iter()
         .map(|(uuid, cols)| {
-            let (manufacturer, product) = name_for_uuid(uuid);
+            let (manufacturer, product_name) = ciq_app_identity(uuid);
             DeveloperSensor {
-                manufacturer: manufacturer.into(),
-                product: product.into(),
+                manufacturer: manufacturer.map(String::from),
+                product_name,
                 uuid: uuid.into(),
                 columns: cols.into_iter().collect(),
             }
@@ -292,12 +326,23 @@ pub(crate) struct SessionMeta {
 
 #[derive(Clone, Default)]
 pub(crate) struct DeviceMeta {
-    pub(crate) manufacturer: Option<String>,
-    pub(crate) product: Option<String>,
+    /// `manufacturer` (field 2), raw. See `manufacturer_name`.
+    pub(crate) manufacturer: Option<u16>,
+    /// `product` (field 4), raw. See `product_key`.
+    pub(crate) product: Option<u16>,
+    /// The file's free-text `product_name` (field 27), verbatim. Often the
+    /// head unit's own label for the sensor, not the product's name.
+    pub(crate) product_name: Option<String>,
     pub(crate) serial_number: Option<String>,
     pub(crate) device_index: Option<u8>,
-    /// ANT+ device type from DeviceInfo (e.g. 11 = bike_power, 120 = heart_rate).
-    pub(crate) ant_device_type: Option<u8>,
+    /// Position of this entry's latest DeviceInfo emission among all
+    /// DeviceInfo messages in the file. Attribution prefers the entry seen last.
+    pub(crate) last_seen: usize,
+    /// `device_type` (field 1), raw. Its meaning depends on `source_type`;
+    /// see `sensor_type`.
+    pub(crate) device_type: Option<u8>,
+    /// `source_type` (field 25), raw: ANT+, BLE, local, ….
+    pub(crate) source_type: Option<u8>,
     /// Columns attributed to this device (populated per-session during merge).
     pub(crate) columns: Vec<String>,
 }
@@ -341,7 +386,7 @@ pub(crate) struct ParseResult {
     pub(crate) extra_data: Vec<TypedColumn>,
     pub(crate) sessions: Vec<SessionMeta>,
     /// All DeviceInfo entries, in order of appearance.  Split into per-session
-    /// groups using `split_devices_per_session` before building output.
+    /// groups using `devices_per_session` before building output.
     pub(crate) devices: Vec<DeviceMeta>,
     pub(crate) developer_sensors: Vec<DeveloperSensor>,
     pub(crate) laps: Vec<LapBoundary>,
@@ -502,6 +547,14 @@ fn assign_lengths(
 
     let first_start = lengths.first().map(|l| l.start_time_us);
 
+    // An idle length is a rest at the wall, a stop: 0 in each column this swim
+    // records, null in a column it does not (AGENTS.md, "A stop is 0, missing
+    // is null").
+    let records_speed = pool_length.is_some() && lengths.iter().any(|l| l.active && l.duration_s > 0.0);
+    let records_cadence = lengths.iter().any(|l| l.active && l.cadence.is_some_and(|c| c != 0));
+    let stopped_speed = records_speed.then_some(0.0);
+    let stopped_cadence = records_cadence.then_some(0);
+
     for record in records {
         let ts = record.timestamp.unwrap_or(0);
 
@@ -527,7 +580,7 @@ fn assign_lengths(
         let length = &lengths[li];
 
         index.push(li as i16);
-        cadence.push(length.cadence);
+        cadence.push(if length.active { length.cadence } else { stopped_cadence });
         stroke.push(length.swim_stroke.clone());
 
         let Some(pool) = pool_length else {
@@ -548,9 +601,9 @@ fn assign_lengths(
             distance.push(Some(cum_start[li] + pool));
             speed.push(None);
         } else {
-            // Idle length (rest): distance holds flat, no pace.
+            // Idle length (rest): distance holds flat; a stop.
             distance.push(Some(cum_start[li]));
-            speed.push(None);
+            speed.push(stopped_speed);
         }
     }
 
@@ -578,6 +631,88 @@ fn rebase_session_distance(records: &mut [RecordRow], carried: Option<f64>) {
     for d in records.iter_mut().filter_map(|r| r.distance.as_mut()) {
         *d = ((*d - carried) * 100.0).round() / 100.0;
     }
+}
+
+/// Indoor-rowing rests: a run of more than this many consecutive records in
+/// which `distance` does not advance.
+const ROWING_REST_MIN_RECORDS: usize = 4;
+/// "Does not advance": by at most one FIT distance unit (1 cm), which also
+/// absorbs the flywheel's coast-down after the last stroke.
+const ROWING_REST_MAX_ADVANCE_CM: f64 = 1.0;
+
+/// Zero `power`, `cadence` and `speed` through indoor-rowing rests, returning
+/// the columns in which a value changed (in schema order).
+///
+/// A rowing monitor reports per-stroke values and holds each until the next
+/// stroke. When the rower stops there is no next stroke, so the last stroke's
+/// power, rate and pace keep arriving and the watch keeps writing them; only
+/// distance stops. A rest is a stop, and a stop is 0 (AGENTS.md, "A stop is 0,
+/// missing is null"): no work, no strokes, no pace, as a bike computer writes
+/// when the rider stops. Rest records get 0 whatever the file held there, held
+/// value or null, in each of these columns the session recorded; a column it
+/// never recorded stays null. Distance, heart rate and every other column are
+/// left as written.
+///
+/// Applies only to FIT `sub_sport = indoor_rowing` sessions whose `distance`
+/// is a reading (non-null, non-zero somewhere): without a distance signal a
+/// rest cannot be told from rowing. Runs are found in timestamp order; a record
+/// without distance belongs to no run and ends one.
+fn clean_rowing_rests(records: &mut [RecordRow], session: Option<&SessionMeta>) -> Vec<String> {
+    let indoor_rowing = session.is_some_and(|s| s.sub_sport.as_deref() == Some("indoor_rowing"));
+    if !indoor_rowing || !records.iter().any(|r| is_reading(r.distance)) {
+        return Vec::new();
+    }
+
+    let mut order: Vec<usize> = (0..records.len()).collect();
+    order.sort_by_key(|&i| records[i].timestamp); // stable: ties keep file order
+    // still[k]: the k-th record in time did not advance distance over the one before.
+    let still: Vec<bool> = (0..order.len())
+        .map(|k| {
+            let current = records[order[k]].distance;
+            let previous = k.checked_sub(1).and_then(|p| records[order[p]].distance);
+            matches!((previous, current), (Some(a), Some(b))
+                if ((b - a) * 100.0).round() <= ROWING_REST_MAX_ADVANCE_CM)
+        })
+        .collect();
+
+    // Only the columns this session recorded are zeroed.
+    let recorded = (
+        records.iter().any(|r| is_reading(r.power)),
+        records.iter().any(|r| is_reading(r.cadence)),
+        records.iter().any(|r| is_reading(r.speed)),
+    );
+    let (mut power, mut cadence, mut speed) = (false, false, false);
+    let mut k = 0;
+    while k < still.len() {
+        let run = still[k..].iter().take_while(|&&s| s).count();
+        if run >= ROWING_REST_MIN_RECORDS {
+            for &i in &order[k..k + run] {
+                let row = &mut records[i];
+                power |= recorded.0 && set_zero(&mut row.power);
+                cadence |= recorded.1 && set_zero(&mut row.cadence);
+                speed |= recorded.2 && set_zero(&mut row.speed);
+            }
+        }
+        k += run.max(1);
+    }
+
+    [("power", power), ("cadence", cadence), ("speed", speed)]
+        .into_iter()
+        .filter(|&(_, changed)| changed)
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// A reading: a present, non-zero value (the convention of `has_reading`).
+fn is_reading<T: PartialEq + Default>(value: Option<T>) -> bool {
+    value.is_some_and(|v| v != T::default())
+}
+
+/// Set a value to 0, returning whether that changed it.
+fn set_zero<T: Copy + PartialEq + Default>(value: &mut Option<T>) -> bool {
+    let changed = *value != Some(T::default());
+    *value = Some(T::default());
+    changed
 }
 
 /// Build the Arrow RecordBatch for a set of records.
@@ -752,52 +887,36 @@ fn build_batch(
 // Metrics detection — which data columns have non-null values
 // ---------------------------------------------------------------------------
 
+/// The metrics a session recorded: its data columns holding at least one
+/// reading (a non-null, non-zero value, see `has_reading`). An idle sensor
+/// writing only zeros did not record its metric; the column itself is left
+/// as written. Latitude and longitude are reported together as `gps`, and the
+/// structural `lap` and `lap_trigger` columns are not metrics.
+///
+/// Developer sensors are credited only with these columns (see
+/// `attribute_devices`), so one definition decides both.
 fn detect_metrics(batch: &RecordBatch) -> Vec<String> {
-    let n = batch.num_rows();
-    if n == 0 {
-        return Vec::new();
-    }
-    let mut metrics = Vec::new();
-    let has_data = |i: usize| batch.column(i).null_count() < n;
-
-    // Standard columns: 0=timestamp 1=hr 2=power 3=cadence 4=speed
-    //   5=latitude 6=longitude 7=altitude 8=temperature 9=distance 10=lap
-    if has_data(1) { metrics.push("heart_rate".into()); }
-    if has_data(2) { metrics.push("power".into()); }
-    if has_data(4) { metrics.push("speed".into()); }
-    if has_data(3) { metrics.push("cadence".into()); }
-    if has_data(5) && has_data(6) { metrics.push("gps".into()); }
-    if has_data(7) { metrics.push("altitude".into()); }
-    if has_data(8) { metrics.push("temperature".into()); }
-    if has_data(9) { metrics.push("distance".into()); }
-    // Skip index 10 (lap) — it's structural, not a metric.
-
-    // Extra columns (indices 11+), includes canonical extras like
-    // core_temperature, smo2, and lap_trigger alongside dynamic extras.
     let schema = batch.schema();
-    for i in 11..batch.num_columns() {
-        if has_data(i) {
-            let name = schema.field(i).name();
-            // lap_trigger is structural, not a metric.
-            if name != "lap_trigger" {
-                metrics.push(name.clone());
+    let has = |name: &str| {
+        schema.index_of(name).is_ok_and(|i| has_reading(batch.column(i).as_ref()))
+    };
+    let mut metrics = Vec::new();
+    for field in schema.fields() {
+        match field.name().as_str() {
+            "timestamp" | "lap" | "lap_trigger" | "longitude" => {}
+            "latitude" => {
+                if has("latitude") && has("longitude") {
+                    metrics.push("gps".to_string());
+                }
+            }
+            name => {
+                if has(name) {
+                    metrics.push(name.to_string());
+                }
             }
         }
     }
-
     metrics
-}
-
-/// Columns holding at least one reading — a non-null value other than zero.
-/// Zero is what a data field writes while its sensor is absent (the same
-/// convention `resolve_merge` relies on for power and cadence), so an
-/// all-zero column is no evidence that its source contributed.
-fn detect_readings(batch: &RecordBatch) -> Vec<String> {
-    let schema = batch.schema();
-    (1..batch.num_columns())
-        .filter(|&i| has_reading(batch.column(i).as_ref()))
-        .map(|i| schema.field(i).name().clone())
-        .collect()
 }
 
 fn has_reading(array: &dyn arrow::array::Array) -> bool {
@@ -842,8 +961,9 @@ fn device_to_dict<'py>(
     device: &DeviceMeta,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new_bound(py);
-    dict.set_item("manufacturer", device.manufacturer.as_deref())?;
-    dict.set_item("product", device.product.as_deref())?;
+    dict.set_item("manufacturer", device.manufacturer_name())?;
+    dict.set_item("product", device.product_key())?;
+    dict.set_item("product_name", device.product_name.as_deref())?;
     dict.set_item("serial_number", device.serial_number.as_deref())?;
     dict.set_item("device_index", device.device_index)?;
     let cols = PyList::empty_bound(py);
@@ -859,8 +979,8 @@ fn sensor_to_dict<'py>(
     sensor: &DeveloperSensor,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new_bound(py);
-    dict.set_item("manufacturer", &sensor.manufacturer)?;
-    dict.set_item("product", &sensor.product)?;
+    dict.set_item("manufacturer", sensor.manufacturer.as_deref())?;
+    dict.set_item("product_name", &sensor.product_name)?;
     let cols = PyList::empty_bound(py);
     for c in &sensor.columns {
         cols.append(c)?;
@@ -869,15 +989,24 @@ fn sensor_to_dict<'py>(
     Ok(dict)
 }
 
+/// What one activity's record columns hold, beyond their values.
+struct ColumnNotes<'a> {
+    /// Columns that recorded something (see `detect_metrics`).
+    metrics: &'a [String],
+    /// Columns reconstructed from pool-swim Length messages (see `assign_lengths`).
+    reconstructed: &'a [String],
+    /// Columns in which held values were nulled (see `clean_rowing_rests`).
+    cleaned: &'a [String],
+}
+
 fn build_activity_dict<'py>(
     py: Python<'py>,
     batch: &RecordBatch,
     session: Option<&SessionMeta>,
     devices: &[DeviceMeta],
     developer_sensors: &[DeveloperSensor],
-    reconstructed_columns: &[String],
+    columns: &ColumnNotes,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let metrics = detect_metrics(batch);
 
     let activity = PyDict::new_bound(py);
     activity.set_item(
@@ -899,15 +1028,10 @@ fn build_activity_dict<'py>(
         }
     };
 
-    // Provenance: columns whose values were reconstructed from Length messages
-    // rather than measured (empty for every non-pool-swim file).
-    let reconstructed_list = PyList::empty_bound(py);
-    for c in reconstructed_columns { reconstructed_list.append(c)?; }
-    meta.set_item("reconstructed_columns", reconstructed_list)?;
-
-    let metrics_list = PyList::empty_bound(py);
-    for m in &metrics { metrics_list.append(m)?; }
-    meta.set_item("metrics", metrics_list)?;
+    // Provenance lists are empty when nothing was reconstructed or cleaned.
+    meta.set_item("reconstructed_columns", PyList::new_bound(py, columns.reconstructed))?;
+    meta.set_item("cleaned_columns", PyList::new_bound(py, columns.cleaned))?;
+    meta.set_item("metrics", PyList::new_bound(py, columns.metrics))?;
 
     let devices_list = PyList::empty_bound(py);
     for d in devices { devices_list.append(device_to_dict(py, d)?)?; }
@@ -1003,7 +1127,8 @@ fn dev_column_winners(records: &[RecordRow], dev_won: u8) -> Vec<(&'static str, 
             winners.push(("cadence", a));
         }
     }
-    if let Some(a) = winning_app(records, |r| r.smo2.is_some_and(|v| v != 0.0), |r| r.smo2_app) {
+    // SmO2 decodes zeros to null (see `smo2_reading`): every value is a reading.
+    if let Some(a) = winning_app(records, |r| r.smo2.is_some(), |r| r.smo2_app) {
         winners.push(("smo2", a));
     }
     if let Some(a) = winning_app(
@@ -1016,37 +1141,52 @@ fn dev_column_winners(records: &[RecordRow], dev_won: u8) -> Vec<(&'static str, 
     winners
 }
 
-/// Find the hardware device that matches an ANT+ device type.
+/// Find the hardware device whose sensor type produces a column.
 /// Skips the creator device (device_index == 0).
-/// When multiple devices match, prefer the one with the highest device_index.
-fn find_device_by_ant_type(devices: &[DeviceMeta], ant_types: &[u8]) -> Option<usize> {
+/// When multiple devices match, prefer the one emitted last (see `last_seen`).
+fn find_device_by_sensor_type(
+    devices: &[DeviceMeta],
+    sensor_types: &[&str],
+    foot_pod: bool,
+) -> Option<usize> {
     devices
         .iter()
         .enumerate()
         .filter(|(_, d)| {
             d.device_index != Some(0)
-                && d.ant_device_type.is_some_and(|t| ant_types.contains(&t))
+                && d.sensor_type().is_some_and(|t| {
+                    sensor_types.contains(&t) || (foot_pod && FOOT_POD_TYPES.contains(&t))
+                })
         })
-        .max_by_key(|(_, d)| d.device_index.unwrap_or(0))
+        .max_by_key(|(_, d)| d.last_seen)
         .map(|(i, _)| i)
 }
 
+/// True when a sensor type is a dedicated sensor for some column (a heart-rate
+/// strap, a power meter). Such a channel is matched by its type alone: its
+/// manufacturer is no evidence that it produced another column (a Wahoo TICKR
+/// is not a Wahoo KICKR).
+fn is_dedicated_sensor_type(sensor_type: &str) -> bool {
+    FOOT_POD_TYPES.contains(&sensor_type)
+        || COLUMN_ATTRIBUTIONS.iter().any(|c| c.sensor_types.contains(&sensor_type))
+}
+
 /// Find a hardware device whose manufacturer is known to produce this metric.
-/// Skips the creator device (device_index == 0) since that's the watch itself.
-/// When multiple devices match, prefer the one with the highest device_index —
-/// in multi-session files the watch re-emits all known devices, and the one
-/// added most recently (highest index) is most likely the active source.
+/// Skips the creator device (device_index == 0) since that's the watch itself,
+/// and channels that declare themselves dedicated sensors for something else.
+/// When multiple devices match, prefer the one emitted last — in multi-session
+/// files the watch re-emits all known devices, and a head unit that reuses an
+/// index for another sensor emits the sensor it switched to after the old one.
 fn find_device_by_manufacturer(devices: &[DeviceMeta], manufacturers: &[&str]) -> Option<usize> {
     devices
         .iter()
         .enumerate()
         .filter(|(_, d)| {
             d.device_index != Some(0)
-                && d.manufacturer
-                    .as_deref()
-                    .is_some_and(|m| manufacturers.contains(&m))
+                && !d.sensor_type().is_some_and(is_dedicated_sensor_type)
+                && d.manufacturer_name().is_some_and(|m| manufacturers.contains(&m))
         })
-        .max_by_key(|(_, d)| d.device_index.unwrap_or(0))
+        .max_by_key(|(_, d)| d.last_seen)
         .map(|(i, _)| i)
 }
 
@@ -1057,23 +1197,23 @@ fn find_creator_device(devices: &[DeviceMeta]) -> Option<usize> {
 
 /// Build per-session device list with column attribution based on merge outcome.
 ///
-/// `metrics` lists the columns that actually contain data in this session, so
-/// we only attribute columns the session really has. `readings` lists the
-/// columns holding at least one non-zero value (see `detect_readings`):
-/// developer sensors (CIQ apps) are credited only with those, and an app
-/// credited with none is dropped. `dev_winners` (see `dev_column_winners`)
+/// `metrics` lists the columns holding at least one reading in this session
+/// (see `detect_metrics`): only those are attributed, developer sensors (CIQ
+/// apps) are credited only with those, and an app credited with none is
+/// dropped. `dev_winners` (see `dev_column_winners`)
 /// names, per developer-sourced canonical column, the app slot in `apps`
 /// that supplied the readings; other apps registering the same field name
-/// lose the column.
+/// lose the column. `on_foot` (see `is_on_foot`) lets a foot pod be a source.
 fn attribute_devices(
     base_devices: &[DeviceMeta],
     developer_sensors: &[DeveloperSensor],
     dev_won: u8,
     metrics: &[String],
-    readings: &[String],
     dev_winners: &[(&str, u8)],
     apps: &[String],
+    on_foot: bool,
 ) -> (Vec<DeviceMeta>, Vec<DeveloperSensor>) {
+    let has_gps = metrics.iter().any(|m| m == "gps");
     let mut devices: Vec<DeviceMeta> = base_devices.to_vec();
     let mut sensors: Vec<DeveloperSensor> = developer_sensors.to_vec();
 
@@ -1083,7 +1223,7 @@ fn attribute_devices(
     // Keep only columns with a reading in this session; a sensor left with
     // none is dropped below.
     for sensor in &mut sensors {
-        sensor.columns.retain(|c| readings.contains(c));
+        sensor.columns.retain(|c| metrics.contains(c));
     }
 
     // When several apps register the same field name (Stryd and the Concept2
@@ -1124,18 +1264,22 @@ fn attribute_devices(
         for sensor in &mut sensors {
             sensor.columns.retain(|c| c != col.name);
         }
-        // Find the best device: consider both ANT+ type and known manufacturer,
-        // preferring the one with the highest device_index (most recently
-        // registered, most likely the active source in multi-sport sessions).
-        let ant_match = find_device_by_ant_type(&devices, col.ant_device_types);
+        // Find the best device: consider both sensor type and known manufacturer,
+        // preferring the one emitted last (the active source when a head unit
+        // re-registers or swaps sensors).
+        let foot_pod = on_foot
+            && match col.foot_pod {
+                FootPod::Never => false,
+                FootPod::Always => true,
+                FootPod::WithoutGps => !has_gps,
+            };
+        let type_match = find_device_by_sensor_type(&devices, col.sensor_types, foot_pod);
         let mfr_match = find_device_by_manufacturer(&devices, col.known_manufacturers);
-        let device_idx = match (ant_match, mfr_match) {
-            (Some(a), Some(m)) if a != m => {
-                let a_idx = devices[a].device_index.unwrap_or(0);
-                let m_idx = devices[m].device_index.unwrap_or(0);
-                Some(if m_idx > a_idx { m } else { a })
+        let device_idx = match (type_match, mfr_match) {
+            (Some(t), Some(m)) if t != m => {
+                Some(if devices[m].last_seen > devices[t].last_seen { m } else { t })
             }
-            (a, m) => a.or(m),
+            (t, m) => t.or(m),
         }
         .or_else(|| find_creator_device(&devices));
         if let Some(idx) = device_idx {
@@ -1151,39 +1295,112 @@ fn attribute_devices(
     (devices, sensors)
 }
 
-/// Deduplicate devices by device_index, merging information from re-emitted
-/// DeviceInfo messages.  FIT files often emit DeviceInfo multiple times for the
-/// same device (e.g. at start and end of activity).  Later emissions may carry
-/// fields (like ANT+ device type) that earlier ones lack.
-fn dedup_devices(devices: &[DeviceMeta]) -> Vec<DeviceMeta> {
-    let mut by_index: Vec<(u8, DeviceMeta)> = Vec::new();
-    for d in devices {
-        let idx = match d.device_index {
-            Some(i) => i,
-            None => {
-                by_index.push((u8::MAX, d.clone()));
-                continue;
-            }
-        };
-        if let Some(existing) = by_index.iter_mut().find(|(i, _)| *i == idx) {
-            // Merge: prefer non-None values from later emission.
-            if existing.1.manufacturer.is_none() {
-                existing.1.manufacturer = d.manufacturer.clone();
-            }
-            if existing.1.product.is_none() {
-                existing.1.product = d.product.clone();
-            }
-            if existing.1.serial_number.is_none() {
-                existing.1.serial_number = d.serial_number.clone();
-            }
-            if existing.1.ant_device_type.is_none() {
-                existing.1.ant_device_type = d.ant_device_type;
-            }
-        } else {
-            by_index.push((idx, d.clone()));
+/// `source_type` values in the FIT profile.
+const SOURCE_TYPE_ANTPLUS: u8 = 1;
+const SOURCE_TYPE_BLE: u8 = 3; // bluetooth_low_energy
+
+impl DeviceMeta {
+    /// The FIT profile name of the manufacturer (`garmin`, `wahoo_fitness`).
+    pub(crate) fn manufacturer_name(&self) -> Option<&'static str> {
+        self.manufacturer.map(profile::manufacturer_name)
+    }
+
+    /// The product as a key: the name the profile's `product` subfield gives
+    /// it for this manufacturer (`hrm_pro`, `assioma_duo`), else the number
+    /// itself, which identifies a product only together with the manufacturer.
+    pub(crate) fn product_key(&self) -> Option<String> {
+        let product = self.product?;
+        Some(
+            self.manufacturer
+                .and_then(|m| profile::device_info_product_name(m, product))
+                .map_or_else(|| product.to_string(), String::from),
+        )
+    }
+
+    /// What the channel says it is (`heart_rate`, `bike_power`, `footpod`): the
+    /// name `device_type`'s profile subfield gives it for this `source_type`.
+    /// A file that predates `source_type` wrote ANT+ types, and so do Wahoo
+    /// head units on Bluetooth channels (120 for a Bluetooth heart-rate strap):
+    /// a Bluetooth value that is not a Bluetooth type is read as ANT+. The two
+    /// numberings do not overlap, so this cannot misread a Bluetooth type.
+    pub(crate) fn sensor_type(&self) -> Option<&'static str> {
+        let device_type = self.device_type?;
+        let read_as = |source| profile::device_info_device_type_name(source, device_type);
+        match self.source_type {
+            None => read_as(SOURCE_TYPE_ANTPLUS),
+            Some(SOURCE_TYPE_BLE) => read_as(SOURCE_TYPE_BLE).or_else(|| read_as(SOURCE_TYPE_ANTPLUS)),
+            Some(source) => read_as(source),
         }
     }
-    by_index.into_iter().map(|(_, d)| d).collect()
+
+    /// True when no identity field that both entries carry disagrees.
+    fn agrees_with(&self, other: &DeviceMeta) -> bool {
+        fn agree<T: PartialEq>(a: &Option<T>, b: &Option<T>) -> bool {
+            !matches!((a, b), (Some(x), Some(y)) if x != y)
+        }
+        agree(&self.manufacturer, &other.manufacturer)
+            && agree(&self.product, &other.product)
+            && agree(&self.product_name, &other.product_name)
+            && agree(&self.serial_number, &other.serial_number)
+            && agree(&self.device_type, &other.device_type)
+            && agree(&self.source_type, &other.source_type)
+    }
+
+    /// Merge a later emission of the same entry: fill gaps, keep what is known.
+    fn absorb(&mut self, later: &DeviceMeta) {
+        fn fill<T: Clone>(slot: &mut Option<T>, value: &Option<T>) {
+            if slot.is_none() {
+                *slot = value.clone();
+            }
+        }
+        fill(&mut self.manufacturer, &later.manufacturer);
+        fill(&mut self.product, &later.product);
+        fill(&mut self.product_name, &later.product_name);
+        fill(&mut self.serial_number, &later.serial_number);
+        fill(&mut self.device_type, &later.device_type);
+        fill(&mut self.source_type, &later.source_type);
+        self.last_seen = self.last_seen.max(later.last_seen);
+    }
+}
+
+/// Collapse re-emitted DeviceInfo messages into one entry per channel.
+///
+/// Devices re-emit DeviceInfo (at the start and end of each session), and a
+/// later emission may carry fields an earlier one lacked, such as the ANT+
+/// type. A message is a re-emission of an existing entry when it has the same
+/// `device_index` and no identity field both carry disagrees; it then fills
+/// that entry's gaps. Anything else is a new entry, even under a reused index:
+/// Wahoo head units hand an index to a different sensor mid-ride. Entries
+/// without an index are never merged.
+///
+/// An entry is a channel, not a physical device: an HRM-Pro is several entries
+/// (heart rate, running dynamics, …) sharing one serial. Attribution works per
+/// channel; the Python layer folds channels that share a serial.
+fn dedup_devices(devices: &[DeviceMeta]) -> Vec<DeviceMeta> {
+    let mut entries: Vec<DeviceMeta> = Vec::new();
+    for d in devices {
+        let existing = d.device_index.and_then(|_| {
+            entries
+                .iter_mut()
+                .rev()
+                .find(|e| e.device_index == d.device_index && e.agrees_with(d))
+        });
+        match existing {
+            Some(entry) => entry.absorb(d),
+            None => entries.push(d.clone()),
+        }
+    }
+    entries
+}
+
+/// Each session's device entries: the file's DeviceInfo messages split per
+/// session, then deduplicated. The full parse and the metadata scan both use
+/// this, so `load_fit` and `open_fit` list the same devices.
+fn devices_per_session(all: &[DeviceMeta], n_sessions: usize) -> Vec<Vec<DeviceMeta>> {
+    if n_sessions <= 1 {
+        return vec![dedup_devices(all)];
+    }
+    split_devices_per_session(all, n_sessions).iter().map(|g| dedup_devices(g)).collect()
 }
 
 /// Split a flat list of DeviceInfo entries into per-session groups.
@@ -1242,18 +1459,18 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
     if parsed.sessions.len() <= 1 {
         // Single session (or no sessions): merge across all records.
         let dev_won = resolve_merge(&mut parsed.records);
+        let cleaned = clean_rowing_rests(&mut parsed.records, parsed.sessions.first());
         let pool_length = parsed.sessions.first().and_then(|s| s.pool_length);
         let (batch, reconstructed) = build_batch(
             &parsed.records, &parsed.extra_col_info, &parsed.extra_data, &parsed.laps,
             &parsed.lengths, pool_length,
         )?;
         let metrics = detect_metrics(&batch);
-        let readings = detect_readings(&batch);
         let winners = dev_column_winners(&parsed.records, dev_won);
-        let deduped = dedup_devices(&parsed.devices);
+        let deduped = devices_per_session(&parsed.devices, 1).remove(0);
         let (devices, sensors) = attribute_devices(
-            &deduped, &parsed.developer_sensors, dev_won, &metrics, &readings,
-            &winners, &parsed.apps,
+            &deduped, &parsed.developer_sensors, dev_won, &metrics,
+            &winners, &parsed.apps, is_on_foot(parsed.sessions.first()),
         );
 
         activities.append(build_activity_dict(
@@ -1262,7 +1479,7 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             parsed.sessions.first(),
             &devices,
             &sensors,
-            &reconstructed,
+            &ColumnNotes { metrics: &metrics, reconstructed: &reconstructed, cleaned: &cleaned },
         )?)?;
     } else {
         // Multi-session: slice records per session, merge each independently.
@@ -1273,8 +1490,7 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             &parsed.records, &parsed.extra_col_info, &parsed.extra_data, &parsed.laps,
             &[], None,
         )?;
-        let device_groups =
-            split_devices_per_session(&parsed.devices, parsed.sessions.len());
+        let device_groups = devices_per_session(&parsed.devices, parsed.sessions.len());
 
         // Assign records to sessions by carry-forward on `start_time` (field 2),
         // NOT the session `timestamp`/end field (253): some devices pin field 253
@@ -1339,6 +1555,7 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             let session_records = &mut parsed.records[first..first + len];
             let dev_won = resolve_merge(session_records);
             rebase_session_distance(session_records, carried[si]);
+            let cleaned = clean_rowing_rests(session_records, Some(session));
 
             // Rebuild fixed columns (+ canonical extras, incl. pool-swim
             // reconstruction) from the now-resolved records.  Dynamic extras come
@@ -1350,12 +1567,11 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             let full_batch = merge_fixed_with_extras(&session_batch, &batch.slice(first, len))?;
 
             let metrics = detect_metrics(&full_batch);
-            let readings = detect_readings(&full_batch);
             let winners = dev_column_winners(session_records, dev_won);
-            let deduped = dedup_devices(&device_groups[si]);
+            let deduped = &device_groups[si];
             let (devices, sensors) = attribute_devices(
-                &deduped, &parsed.developer_sensors, dev_won, &metrics, &readings,
-                &winners, &parsed.apps,
+                deduped, &parsed.developer_sensors, dev_won, &metrics,
+                &winners, &parsed.apps, is_on_foot(Some(session)),
             );
 
             activities.append(build_activity_dict(
@@ -1364,7 +1580,7 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
                 Some(session),
                 &devices,
                 &sensors,
-                &reconstructed,
+                &ColumnNotes { metrics: &metrics, reconstructed: &reconstructed, cleaned: &cleaned },
             )?)?;
         }
     }
@@ -1418,41 +1634,40 @@ fn build_scan_result_dict(py: Python<'_>, scan: &ScanResult) -> PyResult<PyObjec
     let result = PyDict::new_bound(py);
     result.set_item("file_type", scan.file_type.as_deref())?;
     let activities = PyList::empty_bound(py);
+    let device_groups = devices_per_session(&scan.devices, scan.sessions.len());
 
-    let build_one = |session: &SessionMeta| -> PyResult<Bound<'_, PyDict>> {
-        let activity = PyDict::new_bound(py);
-        let meta = session_to_dict(py, session)?;
+    let build_one = |session: Option<&SessionMeta>, devices: &[DeviceMeta]| -> PyResult<()> {
+        let meta = match session {
+            Some(s) => session_to_dict(py, s)?,
+            None => {
+                let d = PyDict::new_bound(py);
+                for key in ["sport", "sub_sport", "name", "start_time", "start_time_local",
+                             "duration", "distance"] {
+                    d.set_item(key, py.None())?;
+                }
+                d
+            }
+        };
         let metrics_list = PyList::empty_bound(py);
         for m in &scan.record_metrics { metrics_list.append(m)?; }
         meta.set_item("metrics", metrics_list)?;
         let devices_list = PyList::empty_bound(py);
-        for d in &scan.devices { devices_list.append(device_to_dict(py, d)?)?; }
+        for d in devices { devices_list.append(device_to_dict(py, d)?)?; }
         meta.set_item("devices", devices_list)?;
         let sensors_list = PyList::empty_bound(py);
         for s in &scan.developer_sensors { sensors_list.append(sensor_to_dict(py, s)?)?; }
         meta.set_item("developer_sensors", sensors_list)?;
+        let activity = PyDict::new_bound(py);
         activity.set_item("metadata", meta)?;
-        Ok(activity)
+        activities.append(activity)
     };
 
     if scan.sessions.is_empty() {
-        let activity = PyDict::new_bound(py);
-        let meta = PyDict::new_bound(py);
-        for key in ["sport", "sub_sport", "name", "start_time", "start_time_local",
-                     "duration", "distance"] {
-            meta.set_item(key, py.None())?;
-        }
-        let metrics_list = PyList::empty_bound(py);
-        for m in &scan.record_metrics { metrics_list.append(m)?; }
-        meta.set_item("metrics", metrics_list)?;
-        meta.set_item("devices", PyList::empty_bound(py))?;
-        let sensors_list = PyList::empty_bound(py);
-        for s in &scan.developer_sensors { sensors_list.append(sensor_to_dict(py, s)?)?; }
-        meta.set_item("developer_sensors", sensors_list)?;
-        activity.set_item("metadata", meta)?;
-        activities.append(activity)?;
+        build_one(None, &device_groups[0])?;
     } else {
-        for session in &scan.sessions { activities.append(build_one(session)?)?; }
+        for (session, devices) in scan.sessions.iter().zip(&device_groups) {
+            build_one(Some(session), devices)?;
+        }
     }
 
     result.set_item("activities", activities)?;
@@ -1758,12 +1973,14 @@ mod tests {
         }
 
         #[test]
-        fn idle_length_holds_distance_flat_and_has_no_pace() {
+        fn idle_length_is_a_stop() {
             let lengths = vec![active(0, 20.0), idle(20, 10.0), active(30, 20.0)];
             let c = assign_lengths(&[rec(25)], &lengths, Some(25.0));
-            // Mid-rest: distance sits at the 25 m already swum, no speed/stroke.
+            // Mid-rest: distance sits at the 25 m already swum, speed and
+            // cadence are 0, no stroke.
             assert_eq!(c.distance, vec![Some(25.0)]);
-            assert_eq!(c.speed, vec![None]);
+            assert_eq!(c.speed, vec![Some(0.0)]);
+            assert_eq!(c.cadence, vec![Some(0)]);
             assert_eq!(c.stroke, vec![None]);
             assert_eq!(c.index, vec![1]);
         }
@@ -1797,20 +2014,33 @@ mod tests {
             let lengths = vec![idle(0, 10.0), idle(10, 10.0)];
             let c = assign_lengths(&[rec(0), rec(5), rec(15)], &lengths, Some(25.0));
             assert_eq!(c.distance, vec![Some(0.0), Some(0.0), Some(0.0)]);
+            // No length was swum, so speed and cadence were never recorded:
+            // no column of zeros.
             assert!(c.speed.iter().all(|s| s.is_none()));
+            assert!(c.cadence.iter().all(|s| s.is_none()));
         }
 
         #[test]
         fn missing_pool_length_yields_no_distance_but_keeps_structure() {
-            // Without an anchor we never fabricate distance, but the length index,
-            // cadence and stroke are still surfaced.
-            let lengths = vec![active(0, 20.0)];
-            let c = assign_lengths(&[rec(0), rec(10)], &lengths, None);
+            // Without an anchor we never fabricate distance or speed, not even
+            // 0 at rest (speed is not recorded), but the length index, cadence
+            // and stroke are still surfaced.
+            let lengths = vec![active(0, 20.0), idle(20, 10.0)];
+            let c = assign_lengths(&[rec(0), rec(10), rec(25)], &lengths, None);
             assert!(c.distance.iter().all(|d| d.is_none()));
             assert!(c.speed.iter().all(|s| s.is_none()));
-            assert_eq!(c.index, vec![0, 0]);
-            assert_eq!(c.cadence, vec![Some(30), Some(30)]);
-            assert_eq!(c.stroke, vec![Some("freestyle".into()), Some("freestyle".into())]);
+            assert_eq!(c.index, vec![0, 0, 1]);
+            assert_eq!(c.cadence, vec![Some(30), Some(30), Some(0)]);
+            assert_eq!(c.stroke, vec![Some("freestyle".into()), Some("freestyle".into()), None]);
+        }
+
+        #[test]
+        fn a_rest_is_not_zero_in_a_column_the_swim_does_not_record() {
+            let mut swum = active(0, 20.0);
+            swum.cadence = None; // no cadence on any length
+            let c = assign_lengths(&[rec(25)], &[swum, idle(20, 10.0)], Some(25.0));
+            assert_eq!(c.speed, vec![Some(0.0)]);
+            assert_eq!(c.cadence, vec![None]);
         }
 
         #[test]
@@ -1892,76 +2122,314 @@ mod tests {
         }
     }
 
+    // ── Indoor-rowing rests ──────────────────────────────────────────────
+
+    mod rowing_rests {
+        use super::*;
+
+        fn session(sub_sport: Option<&str>) -> SessionMeta {
+            SessionMeta { sub_sport: sub_sport.map(String::from), ..Default::default() }
+        }
+
+        fn rowing() -> Option<SessionMeta> {
+            Some(session(Some("indoor_rowing")))
+        }
+
+        /// One record per second: (distance, power); cadence 24, no speed.
+        fn rows(samples: &[(Option<f64>, Option<i16>)]) -> Vec<RecordRow> {
+            samples
+                .iter()
+                .enumerate()
+                .map(|(i, &(distance, power))| RecordRow {
+                    timestamp: Some(i as i64 * 1_000_000),
+                    distance,
+                    power,
+                    cadence: Some(24),
+                    ..Default::default()
+                })
+                .collect()
+        }
+
+        fn powers(records: &[RecordRow]) -> Vec<Option<i16>> {
+            records.iter().map(|r| r.power).collect()
+        }
+
+        /// 0 m, 10 m, then 10 m (and 10.01 m, within 1 cm) for four records, then 20 m.
+        fn with_rest(rest_power: [Option<i16>; 4]) -> Vec<RecordRow> {
+            let [a, b, c, d] = rest_power;
+            rows(&[
+                (Some(0.0), Some(150)), (Some(10.0), Some(200)),
+                (Some(10.0), a), (Some(10.01), b), (Some(10.01), c), (Some(10.01), d),
+                (Some(20.0), Some(210)),
+            ])
+        }
+
+        #[test]
+        fn a_rest_is_a_stop() {
+            let held = Some(200);
+            let mut records = with_rest([held; 4]);
+            let changed = clean_rowing_rests(&mut records, rowing().as_ref());
+            let zero = Some(0);
+            assert_eq!(powers(&records), vec![Some(150), held, zero, zero, zero, zero, Some(210)]);
+            assert_eq!(records[2].cadence, Some(0));
+            assert_eq!(records[1].cadence, Some(24));
+            // No speed was recorded: it stays null, and is not listed.
+            assert!(records.iter().all(|r| r.speed.is_none()));
+            assert_eq!(changed, vec!["power", "cadence"]);
+        }
+
+        #[test]
+        fn a_null_on_a_rest_is_zero_too() {
+            let mut records = with_rest([Some(0), None, Some(0), Some(0)]);
+            let changed = clean_rowing_rests(&mut records, rowing().as_ref());
+            assert_eq!(records[3].power, Some(0));
+            assert!(changed.contains(&"power".to_string()));
+        }
+
+        #[test]
+        fn a_rest_already_at_zero_changes_nothing_in_that_column() {
+            let mut records = with_rest([Some(0); 4]);
+            for r in &mut records[2..6] {
+                r.cadence = Some(0);
+            }
+            assert!(clean_rowing_rests(&mut records, rowing().as_ref()).is_empty());
+        }
+
+        #[test]
+        fn three_still_records_are_not_a_rest() {
+            let d = |m: f64| Some(m);
+            let p = Some(200);
+            let mut records = rows(&[(d(0.0), p), (d(10.0), p), (d(10.0), p), (d(10.0), p), (d(10.0), p), (d(20.0), p)]);
+            assert!(clean_rowing_rests(&mut records, rowing().as_ref()).is_empty());
+            assert!(records.iter().all(|r| r.power == p));
+        }
+
+        #[test]
+        fn a_record_without_distance_ends_a_run() {
+            let p = Some(1);
+            let mut records = rows(&[
+                (Some(5.0), p), (Some(5.0), p), (Some(5.0), p), (None, p),
+                (Some(5.0), p), (Some(5.0), p), (Some(5.0), p),
+            ]);
+            assert!(clean_rowing_rests(&mut records, rowing().as_ref()).is_empty());
+        }
+
+        #[test]
+        fn runs_follow_time_not_file_order() {
+            let d = |m: f64| Some(m);
+            let p = Some(2);
+            let mut records = rows(&[(d(0.0), Some(1)), (d(10.0), p), (d(10.0), p), (d(10.0), p), (d(10.0), p), (d(10.0), p)]);
+            // A late-written record from before the rest: distance 5 m at t = 0.5 s.
+            records.push(RecordRow { timestamp: Some(500_000), distance: d(5.0), power: Some(9), ..Default::default() });
+            clean_rowing_rests(&mut records, rowing().as_ref());
+            let zero = Some(0);
+            assert_eq!(powers(&records), vec![Some(1), p, zero, zero, zero, zero, Some(9)]);
+        }
+
+        #[test]
+        fn only_indoor_rowing_with_a_distance_signal() {
+            let still = [(Some(10.0), Some(200)); 6];
+            for s in [None, Some(session(None)), Some(session(Some("indoor_cycling")))] {
+                let mut records = rows(&still);
+                assert!(clean_rowing_rests(&mut records, s.as_ref()).is_empty());
+            }
+            // The Concept2 data field on a watch whose native distance is 0.
+            let mut records = rows(&[(Some(0.0), Some(200)); 6]);
+            assert!(clean_rowing_rests(&mut records, rowing().as_ref()).is_empty());
+        }
+    }
+
     // ── Device deduplication ─────────────────────────────────────────────
 
     mod device_dedup {
         use super::*;
 
-        fn make_device(idx: Option<u8>, mfr: Option<&str>, product: Option<&str>) -> DeviceMeta {
-            DeviceMeta {
-                device_index: idx,
-                manufacturer: mfr.map(String::from),
-                product: product.map(String::from),
-                ..Default::default()
-            }
+        // FIT profile values.
+        const GARMIN: u16 = 1;
+        const WAHOO: u16 = 32;
+        const FAVERO: u16 = 263;
+        const FENIX6: u16 = 3290;
+        const ASSIOMA_DUO: u16 = 12;
+
+        fn make_device(idx: Option<u8>, mfr: Option<u16>, product: Option<u16>) -> DeviceMeta {
+            DeviceMeta { device_index: idx, manufacturer: mfr, product, ..Default::default() }
         }
 
         #[test]
         fn no_duplicates_unchanged() {
             let devices = vec![
-                make_device(Some(0), Some("garmin"), Some("fenix6")),
-                make_device(Some(1), Some("wahoo"), Some("kickr")),
+                make_device(Some(0), Some(GARMIN), Some(FENIX6)),
+                make_device(Some(1), Some(WAHOO), Some(7)),
             ];
             let result = dedup_devices(&devices);
             assert_eq!(result.len(), 2);
-            assert_eq!(result[0].manufacturer.as_deref(), Some("garmin"));
-            assert_eq!(result[1].manufacturer.as_deref(), Some("wahoo"));
+            assert_eq!(result[0].manufacturer, Some(GARMIN));
+            assert_eq!(result[1].manufacturer, Some(WAHOO));
         }
 
         #[test]
         fn duplicate_index_merges_fills_none() {
             let devices = vec![
-                make_device(Some(1), Some("wahoo"), None), // first emission: no product
-                make_device(Some(1), None, Some("kickr")), // second emission: has product
+                make_device(Some(1), Some(WAHOO), None), // first emission: no product
+                make_device(Some(1), None, Some(7)), // second emission: has product
             ];
             let result = dedup_devices(&devices);
             assert_eq!(result.len(), 1);
-            assert_eq!(result[0].manufacturer.as_deref(), Some("wahoo"));
-            assert_eq!(result[0].product.as_deref(), Some("kickr"));
+            assert_eq!(result[0].manufacturer, Some(WAHOO));
+            assert_eq!(result[0].product, Some(7));
+        }
+
+        fn with_serial(mut d: DeviceMeta, serial: &str, last_seen: usize) -> DeviceMeta {
+            d.serial_number = Some(serial.into());
+            d.last_seen = last_seen;
+            d
         }
 
         #[test]
-        fn first_value_preserved_on_conflict() {
+        fn reused_index_with_another_identity_is_a_new_entry() {
+            // Wahoo: index 2 is an Assioma, then a TICKR.
             let devices = vec![
-                make_device(Some(0), Some("garmin"), Some("fenix6")),
-                make_device(Some(0), Some("different"), Some("other")),
+                make_device(Some(2), Some(FAVERO), Some(ASSIOMA_DUO)),
+                make_device(Some(2), Some(WAHOO), None),
             ];
             let result = dedup_devices(&devices);
+            assert_eq!(result.len(), 2);
+            assert_eq!(result[1].manufacturer, Some(WAHOO));
+        }
+
+        #[test]
+        fn returning_identity_merges_into_its_own_entry() {
+            // Index 2: serial A, then serial B, then serial A again.
+            let assioma = || make_device(Some(2), Some(FAVERO), None);
+            let devices = vec![
+                with_serial(assioma(), "1", 0),
+                with_serial(assioma(), "2", 1),
+                with_serial(assioma(), "1", 2),
+            ];
+            let result = dedup_devices(&devices);
+            assert_eq!(result.len(), 2);
+            assert_eq!(result[0].serial_number.as_deref(), Some("1"));
+            assert_eq!(result[0].last_seen, 2);
+            assert_eq!(result[1].last_seen, 1);
+        }
+
+        #[test]
+        fn product_key_resolves_after_a_sparse_re_emission() {
+            // The product arrives in an emission without the manufacturer.
+            let devices = vec![make_device(Some(2), Some(FAVERO), None), make_device(Some(2), None, Some(ASSIOMA_DUO))];
+            let result = dedup_devices(&devices);
             assert_eq!(result.len(), 1);
-            // First non-None value wins
-            assert_eq!(result[0].manufacturer.as_deref(), Some("garmin"));
-            assert_eq!(result[0].product.as_deref(), Some("fenix6"));
+            assert_eq!(result[0].product_key().as_deref(), Some("assioma_duo"));
+            // No subfield applies without a manufacturer: the number is the key.
+            assert_eq!(make_device(Some(2), None, Some(ASSIOMA_DUO)).product_key().as_deref(), Some("12"));
+        }
+
+        #[test]
+        fn sensor_type_follows_source_type() {
+            let channel = |source_type: Option<u8>, device_type: u8| DeviceMeta {
+                source_type,
+                device_type: Some(device_type),
+                ..Default::default()
+            };
+            assert_eq!(profile::source_type_name(SOURCE_TYPE_ANTPLUS), "antplus");
+            assert_eq!(profile::source_type_name(SOURCE_TYPE_BLE), "bluetooth_low_energy");
+            assert_eq!(channel(Some(1), 120).sensor_type(), Some("heart_rate")); // ANT+
+            assert_eq!(channel(Some(3), 1).sensor_type(), Some("heart_rate")); // BLE
+            assert_eq!(channel(Some(3), 120).sensor_type(), Some("heart_rate")); // Wahoo: ANT+ type on BLE
+            assert_eq!(channel(Some(5), 11).sensor_type(), None); // local: never read as ANT+
+            assert_eq!(channel(Some(5), 1).sensor_type(), Some("glonass")); // local
+            assert_eq!(channel(None, 120).sensor_type(), Some("heart_rate")); // pre-source_type
+            assert_eq!(channel(Some(0), 120).sensor_type(), None); // plain ANT: a number
+        }
+
+        #[test]
+        fn sensor_types_are_profile_names() {
+            let names: BTreeSet<&str> = (0..=u8::MAX)
+                .flat_map(|v| [profile::antplus_device_type_name(v), profile::ble_device_type_name(v)])
+                .collect();
+            for t in COLUMN_ATTRIBUTIONS.iter().flat_map(|c| c.sensor_types).chain(FOOT_POD_TYPES) {
+                assert!(names.contains(t), "{t} is not a FIT device type");
+            }
+        }
+
+        #[test]
+        fn a_foot_pod_measures_only_on_foot() {
+            let channel = |device_type: u8, last_seen: usize| DeviceMeta {
+                device_index: Some(1),
+                device_type: Some(device_type),
+                last_seen,
+                ..Default::default()
+            };
+            let creator = DeviceMeta { device_index: Some(0), ..Default::default() };
+            let devices = [creator, channel(124, 1)]; // an HRM-Pro running channel
+            let attributed = |metrics: &[&str], on_foot: bool| {
+                let metrics: Vec<String> = metrics.iter().map(|m| m.to_string()).collect();
+                let (devices, _) = attribute_devices(&devices, &[], 0, &metrics, &[], &[], on_foot);
+                devices[1].columns.clone()
+            };
+            // A run: cadence always, speed and distance only without GPS.
+            assert_eq!(attributed(&["cadence", "speed", "distance", "gps"], true), vec!["cadence"]);
+            assert_eq!(attributed(&["cadence", "speed", "distance"], true), vec!["cadence", "speed", "distance"]);
+            // A ride: the channel is registered, but nothing came from it.
+            assert!(attributed(&["cadence", "speed", "distance"], false).is_empty());
+        }
+
+        #[test]
+        fn known_manufacturers_are_profile_names() {
+            let names: BTreeSet<&str> = (0..=u16::MAX).map(profile::manufacturer_name).collect();
+            for col in COLUMN_ATTRIBUTIONS {
+                for m in col.known_manufacturers {
+                    assert!(names.contains(m), "{}: {m} is not a FIT manufacturer", col.name);
+                }
+            }
+        }
+
+        #[test]
+        fn a_dedicated_sensor_is_not_matched_by_manufacturer() {
+            // A Wahoo TICKR (heart rate) next to a Favero power meter.
+            let mut tickr = make_device(Some(3), Some(WAHOO), None);
+            tickr.device_type = Some(120);
+            tickr.last_seen = 1;
+            let mut assioma = make_device(Some(2), Some(FAVERO), Some(ASSIOMA_DUO));
+            assioma.device_type = Some(11);
+            let mut kickr = make_device(Some(4), Some(WAHOO), None);
+            kickr.device_type = Some(17); // fitness_equipment
+            let devices = vec![assioma.clone(), tickr.clone()];
+            assert_eq!(find_device_by_manufacturer(&devices, &["wahoo_fitness"]), None);
+            let devices = vec![assioma, tickr, kickr];
+            assert_eq!(find_device_by_manufacturer(&devices, &["wahoo_fitness"]), Some(2));
+        }
+
+        #[test]
+        fn attribution_prefers_the_device_emitted_last() {
+            let power = |serial: &str, idx: u8, last_seen: usize| {
+                let mut d = with_serial(make_device(Some(idx), Some(FAVERO), None), serial, last_seen);
+                d.device_type = Some(11); // bike_power
+                d
+            };
+            // The later emission sits under the lower index.
+            let devices = vec![power("1", 3, 0), power("2", 2, 1)];
+            assert_eq!(find_device_by_sensor_type(&devices, &["bike_power"], false), Some(1));
         }
 
         #[test]
         fn none_index_devices_not_merged() {
             let devices = vec![
-                make_device(None, Some("unknown1"), None),
-                make_device(None, Some("unknown2"), None),
+                make_device(None, Some(1), None),
+                make_device(None, Some(2), None),
             ];
             let result = dedup_devices(&devices);
             assert_eq!(result.len(), 2);
         }
 
         #[test]
-        fn ant_device_type_merged() {
-            let mut d1 = make_device(Some(1), Some("wahoo"), None);
-            d1.ant_device_type = None;
+        fn device_type_merged() {
+            let d1 = make_device(Some(1), Some(WAHOO), None);
             let mut d2 = make_device(Some(1), None, None);
-            d2.ant_device_type = Some(11); // bike_power
+            d2.device_type = Some(11); // bike_power
             let result = dedup_devices(&[d1, d2]);
             assert_eq!(result.len(), 1);
-            assert_eq!(result[0].ant_device_type, Some(11));
+            assert_eq!(result[0].sensor_type(), Some("bike_power"));
         }
     }
 
@@ -1972,8 +2440,8 @@ mod tests {
 
         fn sensor(uuid: &str, columns: &[&str]) -> DeveloperSensor {
             DeveloperSensor {
-                manufacturer: uuid.into(),
-                product: uuid.into(),
+                manufacturer: None,
+                product_name: uuid.into(),
                 uuid: uuid.into(),
                 columns: columns.iter().map(|c| c.to_string()).collect(),
             }
@@ -1986,24 +2454,24 @@ mod tests {
         #[test]
         fn sensor_without_readings_is_dropped() {
             // Fields declared in the Record definition but never written with
-            // a reading: the column exists in the schema, not in `readings`.
+            // a reading: the column exists in the schema, not in `metrics`.
             let (_, sensors) = attribute_devices(
-                &[], &[sensor("c2", &["stroke_rate"])], 0, &strings(&["stroke_rate"]), &[], &[], &[],
+                &[], &[sensor("c2", &["stroke_rate"])], 0, &[], &[], &[], false,
             );
             assert!(sensors.is_empty());
         }
 
         #[test]
         fn sensor_is_credited_only_with_columns_it_read() {
-            // drag_factor is present and non-null (in `metrics`) but all zeros.
+            // drag_factor is present and non-null but all zeros: not a metric.
             let (_, sensors) = attribute_devices(
                 &[],
                 &[sensor("c2", &["stroke_rate", "drag_factor"])],
                 0,
-                &strings(&["stroke_rate", "drag_factor"]),
                 &strings(&["stroke_rate"]),
                 &[],
                 &[],
+                false,
             );
             assert_eq!(sensors.len(), 1);
             assert_eq!(sensors[0].columns, vec!["stroke_rate".to_string()]);
@@ -2018,9 +2486,9 @@ mod tests {
                 &[sensor("stryd", &["power"]), sensor("c2", &["power"])],
                 1, // developer power won the merge
                 &strings(&["power"]),
-                &strings(&["power"]),
                 &[("power", 0)],
                 &apps,
+                false,
             );
             assert_eq!(sensors.len(), 1);
             assert_eq!(sensors[0].uuid, "stryd");
@@ -2038,6 +2506,33 @@ mod tests {
             assert_eq!(dev_column_winners(&records, 1), vec![("power", 0)]);
             // Standard power won the merge: power is not developer-sourced.
             assert!(dev_column_winners(&records, 0).is_empty());
+        }
+
+        #[test]
+        fn metrics_are_columns_with_a_reading() {
+            let schema = Schema::new(vec![
+                Field::new("timestamp", DataType::Int64, true),
+                Field::new("heart_rate", DataType::Int16, true),
+                Field::new("power", DataType::Int16, true),
+                Field::new("latitude", DataType::Float64, true),
+                Field::new("longitude", DataType::Float64, true),
+                Field::new("lap", DataType::Int16, true),
+                Field::new("smo2", DataType::Float32, true),
+            ]);
+            let batch = RecordBatch::try_new(
+                Arc::new(schema),
+                vec![
+                    Arc::new(Int64Array::from(vec![1, 2])),
+                    Arc::new(Int16Array::from(vec![Some(120), None])),
+                    Arc::new(Int16Array::from(vec![Some(0), Some(0)])), // idle sensor
+                    Arc::new(Float64Array::from(vec![Some(52.1), Some(52.2)])),
+                    Arc::new(Float64Array::from(vec![Some(4.3), Some(4.4)])),
+                    Arc::new(Int16Array::from(vec![Some(0), Some(1)])),
+                    Arc::new(Float32Array::from(vec![None::<f32>, None])),
+                ],
+            )
+            .unwrap();
+            assert_eq!(detect_metrics(&batch), vec!["heart_rate", "gps"]);
         }
 
         #[test]

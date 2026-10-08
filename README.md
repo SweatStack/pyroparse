@@ -147,11 +147,15 @@ Manufacturer and Connect IQ developer fields are folded into canonical columns a
 |---|---|---|
 | `power` | native `power`; Stryd developer field `Power` | standard column |
 | `cadence` | native `cadence`; Stryd developer field `Cadence` | standard column |
-| `smo2` | `saturated_hemoglobin_percent`, `SmO2`, `Current Saturated Hemoglobin Percent` | `columns="all"` |
+| `smo2` | `saturated_hemoglobin_percent`, `SmO2`, `Current Saturated Hemoglobin Percent`; a `0` is "no reading" and reads as `null` | `columns="all"` |
 | `core_temperature` | `core_temperature`, `Core Body Temperature` | `columns="all"` |
 | `respiration_rate` | native `enhanced_respiration_rate` (hundredths) or legacy `respiration_rate` (whole numbers), in **breaths/min**, `Float32` | `columns="all"` |
 
+**Zero versus null.** A `0` in a movement column is a stop; a `null` is a missing measurement. Where the file lets pyroparse determine a stop (an indoor-rowing rest, a pool-swim rest at the wall) the movement columns are `0`, even where the device repeated an old value or wrote nothing; see [Rowing](#rowing) and [Swimming](#swimming). Where a device writes a value that means "no signal" (an SmO2 of `0`), it reads as `null`.
+
 Other native fields keep their FIT profile names as extra columns. A field the profile scales (e.g. `stance_time`, `fractional_cadence`, `left_pedal_smoothness`) is a `Float64` holding the decoded value; an unscaled one keeps its integer type.
+
+Muscle-oxygen sensors write `0` when they have no signal, and 0 % saturation is physiologically impossible, so pyroparse decodes an SmO2 of `0` to `null`, like a FIT invalid value, whether it comes from the native field or a Connect IQ app. There is no opt-out: this is decoding, not shaping. A file whose SmO2 is only zeros has no `smo2` column, like any file without SmO2. No such rule applies to `core_temperature`: 0 °C is just as impossible, but no device has been seen to write it.
 
 ### Sorted, de-duplicated by default
 
@@ -222,7 +226,7 @@ df.group_by("lap").agg(
 )
 ```
 
-The three columns are stretched over each length's records differently. `distance` **ramps** smoothly within a length, so it's a genuine per-record cumulative curve, landing on the exact total at each wall. `speed` and `cadence` are the length's **average held constant** across all its records (there's no intra-length pace variation to recover — the file stores one average per length), and both are `null` while resting. Because these are **reconstructed** rather than measured, pyroparse says so — and exposes the pool length:
+The three columns are stretched over each length's records differently. `distance` **ramps** smoothly within a length, so it's a genuine per-record cumulative curve, landing on the exact total at each wall. `speed` and `cadence` are the length's **average held constant** across all its records (there's no intra-length pace variation to recover — the file stores one average per length), and both are `0` while resting at the wall: a rest is a stop. They are `null` only before the first length, which no Length message describes. Because these are **reconstructed** rather than measured, pyroparse says so — and exposes the pool length:
 
 ```python
 activity.metadata.extra["pool_length"]            # 25.0 (metres)
@@ -250,6 +254,20 @@ Open-water swims carry GPS, distance, and speed in the Record stream like any ou
 
 ---
 
+## Rowing
+
+An indoor rowing monitor reports power, stroke rate and pace per stroke, and holds each value until the next stroke. When you stop to rest there is no next stroke, so the monitor keeps broadcasting the last one and the watch keeps writing it: only `distance` stops. Averaged naively, a rest of a few minutes inflates a session's power by the last stroke's watts.
+
+Pyroparse treats a rest as what it is: a stop, so 0 W, 0 strokes/min and 0 m/s, the values a bike computer writes when you stop. In an indoor-rowing session (FIT `sub_sport` `indoor_rowing`, sport `rowing+stationary`) whose `distance` is recorded, a run of **more than 3 consecutive records in which `distance` advances by at most 1 cm** is a rest, and `power`, `cadence` and `speed` are `0` on those records, whether the file held the last stroke or nothing. A column the session never recorded stays `null`. Heart rate, distance and every other column are left as written. Averages stay time-weighted, and work and mean-max curves stay correct. The metadata says which columns changed:
+
+```python
+activity.metadata.extra["cleaned_columns"]  # ["power", "cadence", "speed"]
+```
+
+The key is absent when nothing changed. Outdoor rowing and indoor sessions without a distance signal (for example power from a Connect IQ data field while the watch records no distance) are left alone, since a rest cannot be told from rowing there. There is no opt-out: like the pool-swim reconstruction, this is what the file means, not a shaping choice.
+
+---
+
 ## Structured metadata
 
 Metadata is extracted from FIT Session and DeviceInfo messages, the same source Garmin Connect and Strava use. Sport, timestamps, duration, distance, device info, available metrics: all parsed into a typed dataclass, not left as raw dicts for you to dig through.
@@ -261,6 +279,7 @@ class ActivityMetadata:
     name: str | None                # user-given activity name
     start_time: datetime | None     # UTC
     start_time_local: datetime | None  # naive, local wall-clock time
+    utc_offset: int | None          # seconds; a read-only property, see below
     duration: float | None          # seconds
     distance: float | None          # meters
     metrics: set[str]               # {"heart_rate", "power", "speed", "cadence", "gps"}
@@ -268,9 +287,37 @@ class ActivityMetadata:
     extra: dict                     # sub_sport, anything format-specific
 ```
 
-`start_time_local` comes from the FIT Activity message, which records the activity's end in both UTC and local time; the difference is applied to the session start. It is `None` when a file has no Activity message (for example a truncated recording). Connect IQ apps that wrote data appear in `devices` with `device_type="developer"`; an installed app that never wrote a reading (only nulls or zeros) is not listed.
+`start_time_local` comes from the FIT Activity message, which records the activity's end in both UTC and local time; the difference is applied to the session start. It is `None` when a file has no Activity message (for example a truncated recording). `utc_offset` is that difference in seconds (`7200` for UTC+2), derived from `start_time` and `start_time_local`; it is `None` when either is, or when they are more than 24 hours apart.
 
-The `extra` dict holds format- or sport-specific fields that don't earn a top-level attribute: `sub_sport` (e.g. `"lap_swimming"`), and — for pool swims — `pool_length` (metres) and `reconstructed_columns` (which record columns were derived from Length messages rather than measured; see [Swimming](#swimming)).
+`metrics` lists the columns that recorded something: at least one non-null, **non-zero** value. A sensor that was connected but idle, writing only zeros, did not record its metric; the column itself is left as written. (A column that is legitimately zero on every record, such as a temperature of exactly 0 °C throughout, drops out of `metrics` too.)
+
+The `extra` dict holds format- or sport-specific fields that don't earn a top-level attribute: `sub_sport` (e.g. `"lap_swimming"`); for pool swims, `pool_length` (metres) and `reconstructed_columns` (which record columns were derived from Length messages rather than measured; see [Swimming](#swimming)); and for indoor rowing, `cleaned_columns` (see [Rowing](#rowing)).
+
+### Devices
+
+`devices` lists the head unit and every sensor the file declares (the channels of one sensor, such as an HRM-Pro's heart-rate and running channels, share a serial number and are listed once), plus the Connect IQ apps that wrote data:
+
+```python
+@dataclass
+class Device:
+    name: str | None            # manufacturer and product, joined: "garmin hrm_pro"
+    manufacturer: str | None    # FIT profile name: "garmin", "wahoo_fitness", "favero_electronics"
+    product: str | None         # a key: profile enum name ("hrm_pro", "assioma_duo") or the raw number ("4614")
+    product_name: str | None    # the file's free text, verbatim: "HRM-Pro:620385", "ELEMNT ROAM"
+    serial_number: str | None
+    device_type: str | None     # "creator", "sensor", or "developer"
+    columns: list[str]          # the columns this device recorded
+```
+
+`product` is the identifier to key on. It is the FIT profile's name for the product number, resolved per manufacturer as the profile specifies (Garmin, Dynastream and Tacx share Garmin's product list; Favero has its own), or the number itself when the profile does not know it; a number identifies a product only together with `manufacturer`. `product_name` is whatever free text the file carries, which is often the head unit's own label for the sensor rather than the product's name (a Wahoo head unit labels one Favero Assioma `Power` and another `Assioma` in the same ride). It is kept verbatim and never replaces `product`. Connect IQ apps have no `product`; their `product_name` is the app's label, or its UUID for an app pyroparse does not know.
+
+`name` is a faithful label, not a display name: the manufacturer and the product (the enum name, else `product_name`) joined by a space, with the manufacturer left out when the product already starts with it (`Concept2`). How to present a device is up to your application.
+
+A column goes to the sensor channel that produced it: by the sensor type the channel declares over ANT+ or Bluetooth (a heart-rate strap, a power meter), else by manufacturer for equipment whose type does not say what it measures (a rower). A dedicated sensor is never credited with another column by manufacturer: a Wahoo heart-rate strap is not a Wahoo trainer. When several channels match, the one the head unit registered last wins, since some head units hand a channel index to a different sensor mid-ride.
+
+A foot pod, including an HRM-Pro's running channel, is credited only in running, walking and hiking sessions: with `cadence` always, and with `speed` and `distance` when the session has no GPS (a treadmill). Outdoors the watch takes speed from GPS unless the runner chose the foot pod as speed source; the file does not record that choice, so pyroparse then credits the watch.
+
+Connect IQ apps that wrote data appear in `devices` with `device_type="developer"`; an installed app that never wrote a reading (only nulls or zeros) is not listed.
 
 Manual overrides merge on top of file-native values. A `sport` override is
 validated against the taxonomy, so a typo fails loudly instead of silently

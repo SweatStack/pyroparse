@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from importlib.metadata import version as _version
+
 import pyarrow as pa
 from open_sport_taxonomy import Sport
 
@@ -16,7 +18,10 @@ from pyroparse._schema import STANDARD_COLUMNS
 from pyroparse._session import Session
 from pyroparse._types import Source
 
+__version__ = _version("pyroparse")
+
 __all__ = [
+    "__version__",
     "Activity",
     "ActivityMetadata",
     "ConvertResult",
@@ -40,7 +45,6 @@ __all__ = [
     "scan_fit",
     "scan_parquet",
 ]
-
 
 
 def read_fit(

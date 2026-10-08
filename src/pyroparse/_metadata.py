@@ -7,11 +7,29 @@ from open_sport_taxonomy import Sport
 from open_sport_taxonomy.platforms import garmin_fit
 
 
+_MAX_UTC_OFFSET_S = 24 * 3600
+
+
 @dataclass
 class Device:
+    """A device or Connect IQ app that recorded the activity.
+
+    - ``manufacturer`` — FIT profile enum name (``"garmin"``, ``"wahoo_fitness"``).
+    - ``product`` — a key: the profile's enum name for the product
+      (``"hrm_pro"``, ``"assioma_duo"``), else the raw product number as a
+      string (``"4614"``), which identifies a product only together with
+      ``manufacturer``. ``None`` for Connect IQ apps.
+    - ``product_name`` — the file's free text, verbatim (``"HRM-Pro:620385"``,
+      ``"ELEMNT ROAM"``). Often the head unit's own label for the sensor; for a
+      Connect IQ app, its label or UUID.
+    - ``name`` — ``manufacturer`` and the product joined, see ``_device_name``.
+      A faithful label, not a display name.
+    """
+
     name: str | None = None
     manufacturer: str | None = None
     product: str | None = None
+    product_name: str | None = None
     serial_number: str | None = None
     device_type: str | None = None  # "creator", "sensor", or "developer"
     columns: list[str] = field(default_factory=list)
@@ -39,6 +57,10 @@ class ActivityMetadata:
       from Length messages rather than measured (pool swims only), e.g.
       ``["distance", "speed", "cadence"]``. See the Swimming section of the
       README.
+    - ``cleaned_columns`` — record columns in which values were set to 0
+      because the file shows a stop the device did not write as one
+      (indoor-rowing rests), e.g. ``["power", "cadence", "speed"]``. See the
+      Rowing section of the README.
     """
 
     sport: str | None = None
@@ -50,6 +72,19 @@ class ActivityMetadata:
     metrics: set[str] = field(default_factory=set)
     devices: list[Device] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
+
+    @property
+    def utc_offset(self) -> int | None:
+        """The UTC offset at the start, in seconds: ``start_time_local -
+        start_time``. ``None`` when either is unknown, or when they are more
+        than 24 hours apart (a local time that is not a wall-clock time, as
+        Parquet written before 0.8 can hold for a relative ``local_timestamp``).
+        """
+        if self.start_time is None or self.start_time_local is None:
+            return None
+        utc = self.start_time.astimezone(timezone.utc).replace(tzinfo=None)
+        seconds = (self.start_time_local - utc).total_seconds()
+        return round(seconds) if abs(seconds) <= _MAX_UTC_OFFSET_S else None
 
     def column_source(self, column: str) -> Device | None:
         """Return the device that produced the given column, or None."""
@@ -65,6 +100,7 @@ class ActivityMetadata:
             "name": self.name,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "start_time_local": self.start_time_local.isoformat() if self.start_time_local else None,
+            "utc_offset": self.utc_offset,
             "duration": self.duration,
             "distance": self.distance,
             "metrics": sorted(self.metrics),
@@ -237,6 +273,10 @@ def _build_metadata(raw: dict) -> ActivityMetadata:
     reconstructed = raw.get("reconstructed_columns")
     if reconstructed:
         extra["reconstructed_columns"] = list(reconstructed)
+    # Indoor rowing: columns set to 0 through rests.
+    cleaned = raw.get("cleaned_columns")
+    if cleaned:
+        extra["cleaned_columns"] = list(cleaned)
 
     return ActivityMetadata(
         sport=_decode_sport(sport_raw, sub_sport_raw),
@@ -251,35 +291,50 @@ def _build_metadata(raw: dict) -> ActivityMetadata:
     )
 
 
+def _device_name(
+    manufacturer: str | None, product: str | None, product_name: str | None,
+) -> str | None:
+    """A device's label: ``manufacturer`` and its product, joined by a space.
+
+    The product is ``product`` when it is a profile enum name, else the file's
+    ``product_name`` verbatim; a bare product number names nothing. The
+    manufacturer is left out when the product already starts with it as a word
+    (``Concept2``, ``tacx_training_app_mac_catalyst``). No other formatting:
+    how to display a device is the application's choice.
+    """
+    model = product if product and not product.isdigit() else product_name
+    if manufacturer and model and _starts_with_word(model, manufacturer):
+        return model
+    return " ".join(p for p in (manufacturer, model) if p) or None
+
+
+def _starts_with_word(text: str, prefix: str) -> bool:
+    text, prefix = text.lower(), prefix.lower()
+    return text.startswith(prefix) and not text[len(prefix):len(prefix) + 1].isalnum()
+
+
 def _device_from_raw(raw: dict) -> Device:
     manufacturer = raw.get("manufacturer")
     product = raw.get("product")
-    parts = [p for p in (manufacturer, product) if p]
-    name = " ".join(parts) if parts else None
-    is_creator = raw.get("device_index") == 0
+    product_name = raw.get("product_name")
     return Device(
-        name=name,
+        name=_device_name(manufacturer, product, product_name),
         manufacturer=manufacturer,
         product=product,
+        product_name=product_name,
         serial_number=raw.get("serial_number"),
-        device_type="creator" if is_creator else "sensor",
+        device_type="creator" if raw.get("device_index") == 0 else "sensor",
         columns=list(raw.get("columns", [])),
     )
 
 
 def _sensor_from_raw(raw: dict) -> Device:
     manufacturer = raw.get("manufacturer")
-    product = raw.get("product")
-    # Avoid redundant names like "concept2 Concept2" when they match.
-    if manufacturer and product and manufacturer.lower() == product.lower():
-        name = product
-    else:
-        parts = [p for p in (manufacturer, product) if p]
-        name = " ".join(parts) if parts else None
+    product_name = raw.get("product_name")
     return Device(
-        name=name,
+        name=_device_name(manufacturer, None, product_name),
         manufacturer=manufacturer,
-        product=product,
+        product_name=product_name,
         device_type="developer",
         columns=list(raw.get("columns", [])),
     )

@@ -332,6 +332,19 @@ For `byte` type: individual bytes with value `0xFF` are invalid, but the
 field as a whole is only invalid if every byte is `0xFF`. This differs from
 all other types where a single invalid value makes the field invalid.
 
+### Device sentinels that are not the FIT sentinel
+
+Some devices write a valid-looking value to mean "no reading". Pyroparse
+decodes these to null like a FIT invalid value, only where the meaning is
+documented and the value is physically impossible:
+
+| Field | Written | Why |
+|-------|---------|-----|
+| SmO2 (record field 57, `saturated_hemoglobin_percent`, and developer fields folded into `smo2`) | `0` | The ANT+ muscle-oxygen profile has its own "no reading" codes; devices and Connect IQ apps map them to 0 on the way into the file. 0 % saturation is physiologically impossible. |
+
+`core_temperature` would qualify on the same grounds (0 °C), but no device
+has been seen to write it, so no rule applies.
+
 ---
 
 ## 9. Endianness
@@ -1029,10 +1042,36 @@ session.
 | 2 | manufacturer | uint16 | — | — |
 | 3 | serial_number | uint32z | — | — |
 | 4 | product | uint16 | — | — |
+| 21 | ant_device_number | uint16z | — | — |
+| 25 | source_type | enum | — | — |
 | 27 | product_name | string | — | — |
-| 25 | ant_device_number | uint16z | — | — |
 
 `device_index == 0` identifies the creator device (head unit).
+
+Two fields are read through **subfields** that depend on another field of the
+same message:
+
+- `device_type` (1) is `antplus_device_type` when `source_type` is `antplus`,
+  `ble_device_type` for `bluetooth_low_energy`, `local_device_type` for
+  `local`, and a plain `ant_device_type` for `ant`.
+- `product` (4) is `garmin_product` when `manufacturer` is garmin, dynastream,
+  dynastream_oem or tacx, and `favero_product` when it is favero_electronics;
+  for any other manufacturer it is a bare number. Pyroparse generates this
+  resolution from the profile (`device_info_product_name` in
+  `src/fit/profile.rs`, configured under `[subfields]` in
+  `scripts/profile.toml`).
+
+`product_name` is free text and is not the product's name in any reliable
+sense: head units write their own label for the sensor (`Power`, `TICKR`), and
+BLE sensors may carry a pairing suffix (`HRM-Pro:620385`).
+
+A `device_index` identifies a **channel**, not a physical device: an HRM-Pro
+appears as several entries with one serial number (heart rate, and a
+`stride_speed_distance` channel for running dynamics). Devices re-emit their
+DeviceInfo, typically at each session's start and end, and a re-emission may
+carry fields an earlier one lacked. Some head units (Wahoo) also reuse an index
+for a different sensor during a ride, so the same index with a different
+manufacturer, product or serial number is a different device.
 
 ### lap (global #19)
 
@@ -1132,8 +1171,11 @@ Per session, for each Record:
    for an idle (rest) length. Distance is monotone and integrates a
    piecewise-constant speed, so `distance′ = speed` holds — the ramp is the
    *unique* representation consistent with the reconstructed `speed`.
-3. `speed` = `pool_length / total_elapsed_time` (active lengths only); `cadence` =
-   `avg_swimming_cadence`; `swim_stroke` = the length's stroke; `length` = index.
+3. `speed` = `pool_length / total_elapsed_time` and `cadence` =
+   `avg_swimming_cadence` for an active length; both are 0 for an idle length (a
+   rest is a stop, see AGENTS.md "A stop is 0, missing is null"); `swim_stroke` =
+   the length's stroke; `length` = index. Records before the first length belong
+   to no Length message and get no speed or cadence.
 
 ### Two rules that matter
 

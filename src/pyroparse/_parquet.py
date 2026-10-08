@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import fields
 from datetime import datetime, timezone
 
 import pyarrow as pa
@@ -78,29 +79,7 @@ def read_parquet_metadata(path: str | os.PathLike[str]) -> ActivityMetadata:
 # ---------------------------------------------------------------------------
 
 def _metadata_to_json(meta: ActivityMetadata) -> bytes:
-    return json.dumps({
-        "sport": meta.sport,
-        "name": meta.name,
-        "start_time": meta.start_time.isoformat() if meta.start_time else None,
-        "start_time_local": (
-            meta.start_time_local.isoformat() if meta.start_time_local else None
-        ),
-        "duration": meta.duration,
-        "distance": meta.distance,
-        "metrics": sorted(meta.metrics),
-        "devices": [
-            {
-                "name": d.name,
-                "manufacturer": d.manufacturer,
-                "product": d.product,
-                "serial_number": d.serial_number,
-                "device_type": d.device_type,
-                "columns": d.columns or [],
-            }
-            for d in meta.devices
-        ],
-        "extra": meta.extra,
-    }).encode()
+    return json.dumps(meta.to_dict()).encode()
 
 
 def _json_to_metadata(raw: bytes) -> ActivityMetadata:
@@ -118,15 +97,12 @@ def _json_to_metadata(raw: bytes) -> ActivityMetadata:
         if start_time_local.tzinfo is not None:
             start_time_local = start_time_local.replace(tzinfo=None)
 
+    # Read the fields Device has: a file from an older pyroparse lacks newer
+    # ones (they take their defaults), one from a newer pyroparse may carry
+    # fields this version does not know (ignored).
+    device_fields = {f.name for f in fields(Device)}
     devices = [
-        Device(
-            name=d.get("name"),
-            manufacturer=d.get("manufacturer"),
-            product=d.get("product"),
-            serial_number=d.get("serial_number"),
-            device_type=d.get("device_type"),
-            columns=d.get("columns") or [],
-        )
+        Device(**{k: v for k, v in d.items() if k in device_fields and v is not None})
         for d in data.get("devices", [])
     ]
 
