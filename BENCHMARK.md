@@ -9,7 +9,7 @@ Single-file performance across **963** real activities (3,548,854 total rows).
 | CPU | Apple M1 Pro |
 | RAM | 32 GB |
 | Disk | APPLE SSD AP2048R (internal SSD) |
-| OS | macOS 26.3.1 |
+| OS | macOS 27.0.1 |
 | Python | 3.10.10 |
 | PyArrow | 23.0.1 |
 
@@ -24,24 +24,24 @@ Each operation is measured once per file (no repeated iterations) across
 | Activities | 963 |
 | Total rows | 3,548,854 |
 | Total FIT size | 217 MB |
-| Total Parquet size | 65 MB (27% median compression) |
+| Total Parquet size | 66 MB (28% median compression) |
 
 ## Summary
 
 | Operation | median | p5 | p95 | max |
 |---|--:|--:|--:|--:|
-| **FIT full parse** | **4.3 ms** | 1.2 ms | 18 ms | 89 ms |
-| **FIT metadata scan** | **0.90 ms** | 0.30 ms | 3.4 ms | 11 ms |
-| **Parquet full load** | **0.93 ms** | 0.71 ms | 1.6 ms | 4.7 ms |
-| **Parquet metadata scan** | **0.15 ms** | 0.13 ms | 0.20 ms | 1.0 ms |
-| **Parquet write** | **1.5 ms** | 0.81 ms | 4.0 ms | 7.5 ms |
+| **FIT full parse** | **4.9 ms** | 1.7 ms | 18 ms | 79 ms |
+| **FIT metadata scan** | **0.94 ms** | 0.34 ms | 3.4 ms | 11 ms |
+| **Parquet full load** | **0.86 ms** | 0.65 ms | 1.4 ms | 2.7 ms |
+| **Parquet metadata scan** | **0.19 ms** | 0.16 ms | 0.28 ms | 0.41 ms |
+| **Parquet write** | **1.8 ms** | 1.1 ms | 5.5 ms | 12 ms |
 
 ### Parquet vs FIT speedup
 
 | Operation | median speedup |
 |---|--:|
-| Full load | **4x** |
-| Metadata scan | **6x** |
+| Full load | **6x** |
+| Metadata scan | **5x** |
 
 ## FIT parse time vs file size
 
@@ -73,8 +73,8 @@ Loading only `["timestamp", "power"]` instead of all 12 columns:
 
 | Load mode | FIT median | Parquet median |
 |---|--:|--:|
-| All columns | 4.8 ms | 0.93 ms |
-| Power only | 1.9 ms | 0.64 ms |
+| All columns | 5.0 ms | 0.86 ms |
+| Power only | 2.7 ms | 0.79 ms |
 
 FIT parse time is nearly identical — the Rust decoder must read the full
 binary stream regardless, and column selection only drops unwanted columns

@@ -436,7 +436,7 @@ Scan a directory of `.fit` or `.parquet` files, filter by metadata, load only wh
 ```python
 import pyroparse as pp
 
-# Scan: one row per file, parsed in parallel (~1.5 s per 1,000 files)
+# Scan: one row per file, parsed in parallel (~2 s per 1,000 files)
 catalog = pp.scan_fit("~/data/activities/")
 # file_path | sport | start_time | duration | distance | metrics | ...
 
