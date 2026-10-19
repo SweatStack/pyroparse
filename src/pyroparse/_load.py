@@ -48,8 +48,10 @@ def shape(
 
 def complete_for_columns(meta: ActivityMetadata, columns: list[str]) -> None:
     """Fit *meta* to a table with *columns*: the summary describes that table,
-    and each device keeps only the columns present."""
-    meta.summary = _restrict(meta.summary, columns)
+    and each device keeps only the columns present. Never loads."""
+    summary = meta._known_summary()
+    if summary is not None:
+        meta.summary = _restrict(summary, columns)
     available = set(columns)
     for device in meta.devices:
         device.columns = [c for c in device.columns if c in available]

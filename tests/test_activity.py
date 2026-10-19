@@ -134,11 +134,11 @@ class TestOpenFit:
         assert meta.start_time is not None
         assert meta.start_time.tzinfo is not None
         assert meta.metrics >= {"heart_rate", "power", "speed", "cadence", "gps"}
-        # The summary is computed from the records: it fills when they load.
-        assert meta.summary.duration is None
-        activity.data
+        assert not activity.is_loaded
+        # The summary is computed from the records: reading it loads them.
         assert meta.summary.duration > 0
         assert meta.summary.distance > 0
+        assert activity.is_loaded
 
     def test_data_loads_on_access(self, fit_path):
         activity = Activity.open_fit(fit_path)
@@ -148,7 +148,6 @@ class TestOpenFit:
     def test_metadata_override(self, fit_path):
         activity = Activity.open_fit(fit_path, metadata={"sport": "cycling.gravel"})
         assert activity.metadata.sport == "cycling.gravel"
-        activity.data
         assert activity.metadata.summary.duration is not None
         # The override survives the load.
         assert activity.metadata.sport == "cycling.gravel"
@@ -157,7 +156,6 @@ class TestOpenFit:
         full = Activity.load_fit(fit_path)
         opened = Activity.open_fit(fit_path)
         assert opened.metadata.sport == full.metadata.sport
-        opened.data
         assert opened.metadata.to_dict() == full.metadata.to_dict()
 
     def test_accepts_string_path(self, fit_path):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
+from typing import Callable
 
 from open_sport_taxonomy import Sport
 from open_sport_taxonomy.platforms import garmin_fit
@@ -46,14 +47,40 @@ class Device:
         return f"Device({label} ({tag}){cols})"
 
 
+class _LazySummary:
+    """``ActivityMetadata.summary``: a dataclass field that, on an activity
+    opened from a FIT file, loads the records on first access.
+
+    The summary is computed from the record table, so an opened file has none
+    until its records load; reading it loads them, once, through the same
+    loader as ``Activity.data`` (see ``ActivityMetadata._defer``). A
+    descriptor-typed dataclass field: ``None`` is the default and stands for an
+    empty summary.
+    """
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return None
+        load = obj.__dict__.get("_load")
+        if load is not None:
+            load()  # fills obj and clears "_load" (see ActivityMetadata._fill)
+        return obj.__dict__["_summary"]
+
+    def __set__(self, obj, value: SessionSummary | None) -> None:
+        obj.__dict__["_summary"] = SessionSummary() if value is None else value
+
+
 @dataclass
 class ActivityMetadata:
     """Metadata of one session: what it is (the top level), what happened
     (``summary``) and what the recording device assumed about the athlete
     (``athlete``).
 
-    On an activity opened from a FIT file (``open_fit``), ``summary`` is empty
-    until the records load: it is computed from them.
+    On an activity opened from a FIT file (``open_fit``), reading ``summary``
+    loads the records, once, like ``Activity.data``; everything else is read
+    without loading them. ``to_dict()`` and ``==`` read ``summary`` too. Such a
+    metadata cannot be pickled before its records load (its loader is a
+    closure, as an opened ``Activity``'s is).
 
     The ``extra`` dict carries format- or sport-specific fields without a
     dedicated attribute:
@@ -77,7 +104,7 @@ class ActivityMetadata:
     metrics: set[str] = field(default_factory=set)
     devices: list[Device] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
-    summary: SessionSummary = field(default_factory=SessionSummary)
+    summary: SessionSummary = _LazySummary()
     athlete: Athlete = field(default_factory=Athlete)
 
     @property
@@ -101,7 +128,9 @@ class ActivityMetadata:
         return None
 
     def to_dict(self) -> dict:
-        """Return a JSON-serializable dict."""
+        """Return a JSON-serializable dict. On an opened FIT file, loads the
+        records (the summary is computed from them)."""
+        summary = self.summary  # first: loading refreshes the other fields
         return {
             "sport": self.sport,
             "name": self.name,
@@ -111,39 +140,64 @@ class ActivityMetadata:
             "metrics": sorted(self.metrics),
             "devices": [d.to_dict() for d in self.devices],
             "extra": self.extra,
-            "summary": self.summary.to_dict(),
+            "summary": summary.to_dict(),
             "athlete": self.athlete.to_dict(),
         }
 
+    def __eq__(self, other: object) -> bool:
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        # `summary` first: reading it resolves a pending load, which refreshes
+        # the other fields.
+        return self.summary == other.summary and all(
+            getattr(self, f.name) == getattr(other, f.name) for f in fields(self)
+        )
+
+    # -- Lazy summary (opened FIT files) -----------------------------------------
+
+    def _defer(self, load: Callable[[], object]) -> None:
+        """Make ``summary`` call *load* on first access; *load* must end in
+        ``_fill``."""
+        self.__dict__["_load"] = load
+
     def _fill(self, loaded: ActivityMetadata) -> None:
         """Take every field from *loaded*, in place, so references to this
-        object see the loaded metadata (``open_fit``, when the records load)."""
+        object see the loaded metadata."""
         for f in fields(self):
-            setattr(self, f.name, getattr(loaded, f.name))
+            if f.name != "summary":
+                self.__dict__[f.name] = loaded.__dict__[f.name]
+        self.__dict__["_summary"] = loaded.__dict__["_summary"]
+        self.__dict__.pop("_load", None)
+
+    def _known_summary(self) -> SessionSummary | None:
+        """The summary if it is known without loading anything, else None."""
+        return None if "_load" in self.__dict__ else self.__dict__["_summary"]
 
     # -- Repr ---------------------------------------------------------------------
 
     def _summary_parts(self) -> list[str]:
         """Build the common summary tokens used by both Activity and
-        ActivityMetadata reprs."""
+        ActivityMetadata reprs. Never loads."""
         parts: list[str] = []
         if self.sport:
             parts.append(self.sport)
         if self.start_time:
             parts.append(str(self.start_time.date()))
-        summary = self.summary
-        if summary.duration is not None:
+        summary = self._known_summary()
+        if summary is not None and summary.duration is not None:
             m, s = divmod(int(summary.duration), 60)
             h, m = divmod(m, 60)
             parts.append(f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}")
-        if summary.distance is not None and summary.distance > 0:
+        if summary is not None and summary.distance is not None and summary.distance > 0:
             parts.append(f"{summary.distance / 1000:.1f}km")
         return parts
 
-    def _repr(self, class_name: str) -> str:
+    def _repr(self, class_name: str, *, loaded: bool = True) -> str:
         parts = self._summary_parts()
         n = len(self.devices)
         parts.append(f"{n} device{'s' if n != 1 else ''}")
+        if not loaded:
+            parts.append("not loaded")
 
         lines = [f"{class_name}({', '.join(parts)})"]
         for device in self.devices:
@@ -233,11 +287,12 @@ def _merge_metadata(
     string, regardless of whether it came from the file or the caller.
     ``summary`` and ``athlete`` merge field by field when given as a dict
     (``{"summary": {"calories": 900}}``) and are replaced when given as an
-    instance.
+    instance. Never loads: a pending summary is copied as it stands.
     """
     if not overrides:
         return base
-    kwargs = {f.name: getattr(base, f.name) for f in fields(base)}
+    kwargs = {f.name: base.__dict__[f.name] for f in fields(base) if f.name != "summary"}
+    kwargs["summary"] = base.__dict__["_summary"]
     for name, value in overrides.items():
         if name in ("summary", "athlete") and isinstance(value, dict):
             kwargs[name] = replace(kwargs[name], **value)

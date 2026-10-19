@@ -54,7 +54,7 @@ class Session:
         deduplicate: bool = True,
     ) -> Session:
         """Read the metadata now; load the records on first access to an
-        activity's ``.data``, which also fills its summary. The file is parsed
+        activity's ``.data`` or ``.metadata.summary``. The file is parsed
         once, on the first such access to any of its activities."""
         resolved = str(os.fspath(path))
         raw = _parse_fit_metadata(resolved)
@@ -78,7 +78,12 @@ class Session:
                 return data
             return loader
 
-        return cls([Activity(None, meta, _loader=make_loader(i)) for i, meta in enumerate(metas)])
+        activities = []
+        for i, meta in enumerate(metas):
+            activity = Activity(None, meta, _loader=make_loader(i))
+            meta._defer(lambda activity=activity: activity.data)
+            activities.append(activity)
+        return cls(activities)
 
     def __repr__(self) -> str:
         sports = ", ".join(a.metadata.sport or "unknown" for a in self._activities)

@@ -61,7 +61,9 @@ class TestFromTheFile:
         assert [a.metadata.athlete.max_heart_rate for a in acts[1:]] == [189, 191, 189, 191]
 
     def test_open_fit_reads_it_from_the_scan(self):
-        assert Activity.open_fit(CORE).metadata.athlete == Athlete(189, 167)
+        activity = Activity.open_fit(CORE)
+        assert activity.metadata.athlete == Athlete(189, 167)
+        assert not activity.is_loaded
 
 
 class TestOverridesAndParquet:

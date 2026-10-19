@@ -54,7 +54,9 @@ class Activity:
     """A single parsed activity with data and metadata.
 
     Created via ``load_*()`` (eager) or ``open_*()`` (lazy). An opened
-    activity loads its records on first access to ``.data``.
+    activity loads its records on first access to ``.data`` — or, when opened
+    from a FIT file, to ``.metadata.summary``, which is computed from them.
+    The rest of the metadata never loads them. ``is_loaded`` tells.
     """
 
     __slots__ = ("_data", "_metadata", "_loader")
@@ -82,6 +84,12 @@ class Activity:
     @property
     def metadata(self) -> ActivityMetadata:
         return self._metadata
+
+    @property
+    def is_loaded(self) -> bool:
+        """Whether the records are loaded: always for ``load_*``, after the
+        first ``.data`` (or, from FIT, ``.metadata.summary``) for ``open_*``."""
+        return self._data is not None
 
     # -- Eager loaders ---------------------------------------------------------
 
@@ -162,11 +170,12 @@ class Activity:
         metadata: dict | None = None,
     ) -> Activity:
         """Read the metadata now; load the records on first access to
-        ``.data``.
+        ``.data`` or ``.metadata.summary``.
 
-        The top level and ``athlete`` come from a fast metadata scan. The
-        summary is computed from the records, so it is empty until they load;
-        then the metadata is filled in place and equals ``load_fit``'s.
+        The top level and ``athlete`` come from a fast metadata scan and never
+        load the records. The summary is computed from them, so reading it
+        loads them, once; ``is_loaded`` tells. After loading, the metadata
+        equals ``load_fit``'s.
 
         Experimental: uses a custom binary FIT scanner that may not handle
         all edge cases. Metadata values should be validated against
@@ -185,7 +194,9 @@ class Activity:
             meta._fill(loaded)
             return data
 
-        return cls(None, meta, _loader=loader)
+        activity = cls(None, meta, _loader=loader)
+        meta._defer(lambda: activity.data)
+        return activity
 
     @classmethod
     def open_parquet(
@@ -225,7 +236,7 @@ class Activity:
     # -- Dunder ----------------------------------------------------------------
 
     def __repr__(self) -> str:
-        return self._metadata._repr("Activity")
+        return self._metadata._repr("Activity", loaded=self.is_loaded)
 
 
 # ---------------------------------------------------------------------------

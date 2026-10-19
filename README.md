@@ -46,17 +46,24 @@ activity.data                   # pyarrow.Table — 21,666 rows × 11 typed colu
 
 ### Lazy loading
 
-`open_fit()` and `open_parquet()` read metadata immediately but defer data loading until you access `.data`. Useful when you need to inspect metadata before deciding whether to load the full timeseries.
+`open_fit()` and `open_parquet()` read metadata immediately but defer data loading. Useful when you need to inspect metadata before deciding whether to load the full timeseries.
 
 ```python
 activity = pp.Activity.open_fit("ride.fit")
 activity.metadata.sport             # "cycling" — available immediately
-activity.metadata.athlete           # Athlete(max_heart_rate=189, ...) — available immediately
-activity.data                       # pyarrow.Table — parsed on first access
-activity.metadata.summary.duration  # 3842.0 — computed from the records once they load
+activity.metadata.athlete           # Athlete(max_heart_rate=189, ...) — no records read
+activity.is_loaded                  # False
+activity.metadata.summary.duration  # 3842.0 — parses the file
+activity.data                       # pyarrow.Table — already parsed
 ```
 
-From a FIT file the summary is computed from the records, so it is empty until `.data` loads them; the metadata is then filled in place and equals `load_fit()`'s. From Parquet it is stored and available immediately.
+| | `open_fit` | `open_parquet` |
+|---|---|---|
+| Top level, `athlete` | free | free |
+| `summary` | loads the records (it is computed from them) | free (stored in the file) |
+| `data` | loads the records | loads the rows |
+
+The records load once, whichever triggers it, and `is_loaded` tells. The repr never loads (`Activity(cycling, 2024-03-19, 2 devices, not loaded)`). After loading, an opened activity's metadata equals `load_fit()`'s.
 
 ### FIT to Parquet
 

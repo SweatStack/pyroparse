@@ -243,35 +243,63 @@ class TestDeviceFields:
 
 
 # ---------------------------------------------------------------------------
-# open_fit: the summary fills when the records load
+# open_fit: .summary loads, like .data
 # ---------------------------------------------------------------------------
+
+@pytest.fixture
+def parse_counter(monkeypatch):
+    """Count full parses."""
+    import pyroparse._activity as activity_module
+
+    calls = []
+    real = activity_module._call_parser
+
+    def counting(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(activity_module, "_call_parser", counting)
+    return calls
+
 
 class TestOpenFitLoading:
     PATH = FIXTURES / "cycling-core-temperature.fit"
 
-    def test_empty_until_the_records_load(self):
+    def test_repr_top_level_and_athlete_do_not_load(self, parse_counter):
         activity = Activity.open_fit(self.PATH)
-        assert activity.metadata.summary == SessionSummary()
-        activity.data
+        assert "not loaded" in repr(activity)
+        activity.metadata.sport, activity.metadata.devices, activity.metadata.athlete
+        assert not activity.is_loaded
+        assert parse_counter == []
+
+    def test_summary_loads_once(self, parse_counter):
+        activity = Activity.open_fit(self.PATH)
         assert activity.metadata.summary.avg_power is not None
+        assert activity.is_loaded
+        activity.data
+        activity.metadata.summary
+        assert len(parse_counter) == 1
+        assert "not loaded" not in repr(activity)
 
     def test_equals_load_fit_after_loading(self):
         opened = Activity.open_fit(self.PATH)
-        opened.data
         loaded = Activity.load_fit(self.PATH)
         assert opened.metadata.to_dict() == loaded.metadata.to_dict()
         assert opened.metadata == loaded.metadata
 
     def test_a_summary_override_survives_the_load(self):
         activity = Activity.open_fit(self.PATH, metadata={"summary": {"calories": 1}})
-        activity.data
+        assert not activity.is_loaded
         assert activity.metadata.summary.calories == 1
         assert activity.metadata.summary.avg_power is not None
 
-    def test_session_open_fit(self):
-        acts = Session.open_fit(FOUR).activities
-        for a in acts:
-            a.data
+    def test_session_open_fit(self, parse_counter):
+        session = Session.open_fit(FOUR)
+        acts = session.activities
+        assert not any(a.is_loaded for a in acts)
+        assert acts[1].metadata.summary.timer_time is not None
+        assert acts[1].is_loaded and not acts[0].is_loaded
+        assert acts[0].metadata.summary.timer_time is not None
         loaded = Session.load_fit(FOUR).activities
         assert [a.metadata for a in acts] == [a.metadata for a in loaded]
 
@@ -335,9 +363,11 @@ class TestParquet:
             assert summary.avg_heart_rate is None
             assert summary.calories is not None
 
-    def test_open_parquet_reads_the_stored_summary(self, written):
+    def test_open_parquet_summary_does_not_load(self, written):
         path, original = written
-        assert Activity.open_parquet(path).metadata.summary == original.metadata.summary
+        activity = Activity.open_parquet(path)
+        assert activity.metadata.summary == original.metadata.summary
+        assert not activity.is_loaded
 
     def test_older_file(self, tmp_path):
         # Written before 0.11: duration and distance at the top level.
