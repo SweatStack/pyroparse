@@ -34,6 +34,8 @@ Types of changes:
 - **`metadata.athlete`** (`Athlete`): `max_heart_rate` and `threshold_heart_rate` the device applied to the session, from its `time_in_zone` message; sport-specific, `None` when not set (Garmin writes 0). Read by both `load_fit` and the `open_fit` scan, resolved per section in chained files, included in `to_dict()` and the Parquet metadata (`$.athlete`). `metadata={"athlete": {…}}` merges field by field; an instance replaces.
 - `docs/FIT-FORMAT.md`: timer group 0 events, `time_in_zone`, `workout_feel`/`workout_rpe`, the `time_in_zone` sentinel and per-section message indices in chained files.
 
+- **Wheels for Python 3.14 and 3.15.** pyroparse now ships one stable-ABI (`abi3`) wheel per platform, built for CPython 3.10 and loadable by every later version, and tested on 3.10 through 3.15. Built with PyO3 0.29 (from 0.22), `pyo3-arrow` 0.19 and `arrow` 59; building from source needs maturin 1.9.4 or later.
+
 ### Fixed
 - **`load_fit_batch` and `scan_fit` parse files in parallel.** The Rust decoder held the GIL, so their threads ran one at a time.
 

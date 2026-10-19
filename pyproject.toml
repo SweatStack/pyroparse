@@ -9,24 +9,31 @@ dependencies = ["pyarrow>=14.0", "tqdm>=4.60", "open-sport-taxonomy>=0.10,<0.12"
 
 [project.optional-dependencies]
 server = ["starlette", "uvicorn[standard]", "python-multipart"]
-dev = ["pytest>=7.0", "maturin>=1.5"]
+dev = ["pytest>=7.0", "maturin>=1.9.4"]
 scripts = ["polars", "duckdb>=1.1", "sweatstack", "httpx", "matplotlib"]
 
 [project.scripts]
 pyroparse = "pyroparse.__main__:main"
 
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
+# maturin >= 1.9.4 sets PYO3_BUILD_EXTENSION_MODULE, which replaces PyO3's
+# extension-module feature.
+requires = ["maturin>=1.9.4,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
 module-name = "pyroparse._core"
 python-source = "src"
 
 [tool.cibuildwheel]
-build = "cp310-* cp311-* cp312-* cp313-*"
-skip = "*-win32 *-manylinux_i686"
+# The extension uses the stable ABI (PyO3 `abi3-py310`): one wheel per platform,
+# built on cp310, runs on every later CPython. cibuildwheel reuses that wheel for
+# each newer version below and runs the tests there, so every supported Python
+# is tested. Add the next CPython here when it is released.
+build = "cp310-* cp311-* cp312-* cp313-* cp314-* cp315-*"
+# Free-threaded CPython (cp3XXt) cannot load abi3 wheels; supporting it means
+# an `abi3t` build (3.15+) and a thread-safety review, not a config line.
+skip = "*-win32 *-manylinux_i686 cp3??t-*"
 test-requires = ["pytest", "tzdata"]
 test-command = "pytest {project}/tests -x --no-header -q"
 

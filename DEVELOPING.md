@@ -54,7 +54,7 @@ uv run python -m pytest tests/test_activity.py -v
 uv run python -m pytest tests/test_activity.py::TestLoadFit::test_row_count -v
 ```
 
-Run both `cargo test` and `uv run python -m pytest` before pushing. If `cargo test` fails to build because the system Python is newer than PyO3 supports, point it at the venv: `PYO3_PYTHON=.venv/bin/python cargo test`. The Rust tests cover parsing primitives (value conversion, field normalization, type promotion, lap assignment, device dedup). The Python tests cover end-to-end behavior.
+Run both `cargo test` and `uv run python -m pytest` before pushing. The Rust tests cover parsing primitives (value conversion, field normalization, type promotion, lap assignment, device dedup). The Python tests cover end-to-end behavior.
 
 ## Benchmark
 

@@ -25,6 +25,8 @@ jobs:
         run: uv sync --group dev
       - name: Build extension
         run: uv run maturin develop --release
+      - name: Run Rust tests
+        run: cargo test
       - name: Run tests
         run: uv run python -m pytest tests/ -x --no-header -q
 
@@ -36,7 +38,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build wheels
-        run: pipx run cibuildwheel --output-dir dist
+        run: pipx run cibuildwheel==4.3.1 --output-dir dist
         env:
           CIBW_ARCHS_LINUX: x86_64
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -52,7 +54,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build wheels
-        run: pipx run cibuildwheel --output-dir dist
+        run: pipx run cibuildwheel==4.3.1 --output-dir dist
         env:
           CIBW_ARCHS_LINUX: aarch64
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -70,7 +72,7 @@ jobs:
       - name: Add Rust cross-compilation target
         run: rustup target add x86_64-apple-darwin
       - name: Build wheels
-        run: pipx run cibuildwheel --output-dir dist
+        run: pipx run cibuildwheel==4.3.1 --output-dir dist
         env:
           CIBW_ARCHS_MACOS: x86_64 arm64
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -86,7 +88,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build wheels
-        run: pipx run cibuildwheel --output-dir dist
+        run: pipx run cibuildwheel==4.3.1 --output-dir dist
         env:
           CIBW_ARCHS_WINDOWS: AMD64
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

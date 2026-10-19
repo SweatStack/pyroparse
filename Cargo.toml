@@ -9,10 +9,15 @@ crate-type = ["cdylib"]
 
 [dependencies]
 fitparser = "0.10"
-pyo3 = { version = "0.22", features = ["extension-module"] }
-arrow = { version = "53", default-features = false }
-pyo3-arrow = "0.5"
-pythonize = "0.22"
+# One stable-ABI (abi3) wheel per platform runs on CPython 3.10 and every
+# later version. The extension-module linking is set by maturin
+# (PYO3_BUILD_EXTENSION_MODULE), so `cargo test` links libpython as usual.
+pyo3 = { version = "0.29", features = ["abi3-py310"] }
+# pyo3-arrow, arrow and pythonize versions follow pyo3's: upgrade them together.
+arrow = { version = "59", default-features = false }
+# Without the default buffer-protocol feature: not in 3.10's limited API, and unused.
+pyo3-arrow = { version = "0.19", default-features = false }
+pythonize = "0.29"
 
 # Keep dev builds fast enough for interactive use — the fitparser crate
 # is extremely slow at opt-level 0.

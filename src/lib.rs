@@ -976,19 +976,19 @@ fn session_to_dict<'py>(
     py: Python<'py>,
     session: &SessionMeta,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     dict.set_item("sport", session.sport.as_deref())?;
     dict.set_item("sub_sport", session.sub_sport.as_deref())?;
     dict.set_item("name", session.name.as_deref())?;
     dict.set_item("start_time", session.start_time)?;
     dict.set_item("start_time_local", session.start_time_local)?;
     dict.set_item("pool_length", session.pool_length)?;
-    let summary = PyDict::new_bound(py);
+    let summary = PyDict::new(py);
     for &(name, value) in &session.summary {
         set_value(&summary, name, value)?;
     }
     dict.set_item("summary", summary)?;
-    let athlete = PyDict::new_bound(py);
+    let athlete = PyDict::new(py);
     athlete.set_item("max_heart_rate", session.athlete.max_heart_rate)?;
     athlete.set_item("threshold_heart_rate", session.athlete.threshold_heart_rate)?;
     dict.set_item("athlete", athlete)?;
@@ -1006,13 +1006,13 @@ fn device_to_dict<'py>(
     py: Python<'py>,
     device: &DeviceMeta,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     dict.set_item("manufacturer", device.manufacturer_name())?;
     dict.set_item("product", device.product_key())?;
     dict.set_item("product_name", device.product_name.as_deref())?;
     dict.set_item("serial_number", device.serial_number.as_deref())?;
     dict.set_item("device_index", device.device_index)?;
-    let cols = PyList::empty_bound(py);
+    let cols = PyList::empty(py);
     for c in &device.columns {
         cols.append(c)?;
     }
@@ -1024,10 +1024,10 @@ fn sensor_to_dict<'py>(
     py: Python<'py>,
     sensor: &DeveloperSensor,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     dict.set_item("manufacturer", sensor.manufacturer.as_deref())?;
     dict.set_item("product_name", &sensor.product_name)?;
-    let cols = PyList::empty_bound(py);
+    let cols = PyList::empty(py);
     for c in &sensor.columns {
         cols.append(c)?;
     }
@@ -1056,16 +1056,16 @@ fn build_activity_dict<'py>(
     inputs: &SummaryInputs,
 ) -> PyResult<Bound<'py, PyDict>> {
 
-    let activity = PyDict::new_bound(py);
+    let activity = PyDict::new(py);
     activity.set_item(
         "records",
-        pyo3_arrow::PyRecordBatch::new(batch.clone()).to_pyarrow(py)?,
+        pyo3_arrow::PyRecordBatch::new(batch.clone()).into_pyarrow(py)?,
     )?;
 
     let meta = match session {
         Some(s) => session_to_dict(py, s)?,
         None => {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             for key in [
                 "sport", "sub_sport", "name", "start_time", "start_time_local", "pool_length",
             ] {
@@ -1076,21 +1076,21 @@ fn build_activity_dict<'py>(
     };
 
     // Provenance lists are empty when nothing was reconstructed or cleaned.
-    meta.set_item("reconstructed_columns", PyList::new_bound(py, columns.reconstructed))?;
-    meta.set_item("cleaned_columns", PyList::new_bound(py, columns.cleaned))?;
-    meta.set_item("metrics", PyList::new_bound(py, columns.metrics))?;
+    meta.set_item("reconstructed_columns", columns.reconstructed)?;
+    meta.set_item("cleaned_columns", columns.cleaned)?;
+    meta.set_item("metrics", columns.metrics)?;
 
-    let devices_list = PyList::empty_bound(py);
+    let devices_list = PyList::empty(py);
     for d in devices { devices_list.append(device_to_dict(py, d)?)?; }
     meta.set_item("devices", devices_list)?;
 
-    let sensors_list = PyList::empty_bound(py);
+    let sensors_list = PyList::empty(py);
     for s in developer_sensors { sensors_list.append(sensor_to_dict(py, s)?)?; }
     meta.set_item("developer_sensors", sensors_list)?;
 
     activity.set_item("metadata", meta)?;
 
-    let summary_inputs = PyDict::new_bound(py);
+    let summary_inputs = PyDict::new(py);
     summary_inputs.set_item("start", session.and_then(|s| s.start_timestamp_us))?;
     summary_inputs.set_item("end", inputs.end)?;
     summary_inputs.set_item("running", inputs.running)?;
@@ -1513,10 +1513,10 @@ fn split_devices_per_session(
 
 // ---------------------------------------------------------------------------
 
-fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<PyObject> {
-    let result = PyDict::new_bound(py);
+fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<Py<PyAny>> {
+    let result = PyDict::new(py);
     result.set_item("file_type", parsed.file_type.as_deref())?;
-    let activities = PyList::empty_bound(py);
+    let activities = PyList::empty(py);
 
     if parsed.sessions.len() <= 1 {
         // Single session (or no sessions): merge across all records.
@@ -1698,33 +1698,33 @@ fn merge_fixed_with_extras(
 
 
 
-fn build_scan_result_dict(py: Python<'_>, scan: &ScanResult) -> PyResult<PyObject> {
-    let result = PyDict::new_bound(py);
+fn build_scan_result_dict(py: Python<'_>, scan: &ScanResult) -> PyResult<Py<PyAny>> {
+    let result = PyDict::new(py);
     result.set_item("file_type", scan.file_type.as_deref())?;
-    let activities = PyList::empty_bound(py);
+    let activities = PyList::empty(py);
     let device_groups = devices_per_session(&scan.devices, scan.sessions.len());
 
     let build_one = |session: Option<&SessionMeta>, devices: &[DeviceMeta]| -> PyResult<()> {
         let meta = match session {
             Some(s) => session_to_dict(py, s)?,
             None => {
-                let d = PyDict::new_bound(py);
+                let d = PyDict::new(py);
                 for key in ["sport", "sub_sport", "name", "start_time", "start_time_local"] {
                     d.set_item(key, py.None())?;
                 }
                 d
             }
         };
-        let metrics_list = PyList::empty_bound(py);
+        let metrics_list = PyList::empty(py);
         for m in &scan.record_metrics { metrics_list.append(m)?; }
         meta.set_item("metrics", metrics_list)?;
-        let devices_list = PyList::empty_bound(py);
+        let devices_list = PyList::empty(py);
         for d in devices { devices_list.append(device_to_dict(py, d)?)?; }
         meta.set_item("devices", devices_list)?;
-        let sensors_list = PyList::empty_bound(py);
+        let sensors_list = PyList::empty(py);
         for s in &scan.developer_sensors { sensors_list.append(sensor_to_dict(py, s)?)?; }
         meta.set_item("developer_sensors", sensors_list)?;
-        let activity = PyDict::new_bound(py);
+        let activity = PyDict::new(py);
         activity.set_item("metadata", meta)?;
         activities.append(activity)
     };
@@ -1745,19 +1745,19 @@ fn build_scan_result_dict(py: Python<'_>, scan: &ScanResult) -> PyResult<PyObjec
 // Python-exposed functions
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn do_parse(py: Python<'_>, data: &[u8], columns: Option<Vec<String>>) -> PyResult<PyObject> {
+fn do_parse(py: Python<'_>, data: &[u8], columns: Option<Vec<String>>) -> PyResult<Py<PyAny>> {
     let config = fit::decode::ParseConfig { columns };
     // Decoding touches no Python object: release the GIL so that threads
     // (`scan_fit`, `load_fit_batch`) parse files in parallel.
     let parsed = py
-        .allow_threads(|| fit::decode::full_parse(data, &config))
+        .detach(|| fit::decode::full_parse(data, &config))
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
     build_parse_result_dict(py, parsed)
 }
 
 #[pyfunction]
 #[pyo3(signature = (path, columns=None))]
-fn parse_fit(py: Python<'_>, path: &str, columns: Option<Vec<String>>) -> PyResult<PyObject> {
+fn parse_fit(py: Python<'_>, path: &str, columns: Option<Vec<String>>) -> PyResult<Py<PyAny>> {
     let data = std::fs::read(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
     do_parse(py, &data, columns)
@@ -1765,17 +1765,17 @@ fn parse_fit(py: Python<'_>, path: &str, columns: Option<Vec<String>>) -> PyResu
 
 #[pyfunction]
 #[pyo3(signature = (data, columns=None))]
-fn parse_fit_bytes(py: Python<'_>, data: &[u8], columns: Option<Vec<String>>) -> PyResult<PyObject> {
+fn parse_fit_bytes(py: Python<'_>, data: &[u8], columns: Option<Vec<String>>) -> PyResult<Py<PyAny>> {
     do_parse(py, data, columns)
 }
 
 /// Metadata-only scan from file path — skips Record data.
 #[pyfunction]
-fn parse_fit_metadata(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+fn parse_fit_metadata(py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
     let data = std::fs::read(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
     let result = py
-        .allow_threads(|| fit::decode::scan_metadata(&data))
+        .detach(|| fit::decode::scan_metadata(&data))
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
     build_scan_result_dict(py, &result)
 }
@@ -1783,7 +1783,7 @@ fn parse_fit_metadata(py: Python<'_>, path: &str) -> PyResult<PyObject> {
 /// Dump all FIT messages as Python dicts — faithfully mirrors fitparser's
 /// FitDataRecord / FitDataField structures with no pyroparse opinions applied.
 #[pyfunction]
-fn dump_fit_messages(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+fn dump_fit_messages(py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
     let data = std::fs::read(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
     let messages = read_fit_messages(&mut std::io::Cursor::new(data))?;
@@ -1793,7 +1793,7 @@ fn dump_fit_messages(py: Python<'_>, path: &str) -> PyResult<PyObject> {
 }
 
 #[pyfunction]
-fn dump_fit_messages_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
+fn dump_fit_messages_bytes(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
     let messages = read_fit_messages(&mut std::io::Cursor::new(data))?;
     pythonize::pythonize(py, &messages)
         .map(|bound| bound.unbind())
@@ -1822,19 +1822,19 @@ fn build_course_track_batch(records: &[RecordRow]) -> PyResult<RecordBatch> {
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
-fn build_course_result_dict(py: Python<'_>, parsed: CourseResult) -> PyResult<PyObject> {
-    let result = PyDict::new_bound(py);
+fn build_course_result_dict(py: Python<'_>, parsed: CourseResult) -> PyResult<Py<PyAny>> {
+    let result = PyDict::new(py);
 
     let track = build_course_track_batch(&parsed.records)?;
     result.set_item(
         "track",
-        pyo3_arrow::PyRecordBatch::new(track).to_pyarrow(py)?,
+        pyo3_arrow::PyRecordBatch::new(track).into_pyarrow(py)?,
     )?;
 
     // Waypoints as a list of dicts (small data — not worth an Arrow batch).
-    let waypoints = PyList::empty_bound(py);
+    let waypoints = PyList::empty(py);
     for pt in &parsed.course_points {
-        let d = PyDict::new_bound(py);
+        let d = PyDict::new(py);
         d.set_item("name", pt.name.as_deref())?;
         d.set_item("type", pt.point_type.as_deref())?;
         d.set_item("latitude", pt.latitude)?;
@@ -1843,7 +1843,7 @@ fn build_course_result_dict(py: Python<'_>, parsed: CourseResult) -> PyResult<Py
         waypoints.append(d)?;
     }
 
-    let meta = PyDict::new_bound(py);
+    let meta = PyDict::new(py);
     meta.set_item("name", parsed.meta.name.as_deref())?;
     meta.set_item("total_distance", parsed.meta.total_distance)?;
     meta.set_item("total_ascent", parsed.meta.total_ascent)?;
@@ -1854,21 +1854,21 @@ fn build_course_result_dict(py: Python<'_>, parsed: CourseResult) -> PyResult<Py
     Ok(result.into_any().unbind())
 }
 
-fn do_parse_course(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
+fn do_parse_course(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
     let parsed = fit::decode::parse_course(data)
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
     build_course_result_dict(py, parsed)
 }
 
 #[pyfunction]
-fn parse_course(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+fn parse_course(py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
     let data = std::fs::read(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
     do_parse_course(py, &data)
 }
 
 #[pyfunction]
-fn parse_course_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
+fn parse_course_bytes(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
     do_parse_course(py, data)
 }
 
@@ -1883,13 +1883,13 @@ fn summarize(
     end: Option<i64>,
     running: Option<Vec<summary::Interval>>,
     pool_distance: Option<f64>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let (batches, schema) = table.into_inner();
     let batch = summary::single_batch(&schema, &batches)
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
     let values = summary::summarize(&batch, start, end, running.as_deref(), pool_distance)
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     for (name, value) in values {
         set_value(&dict, name, value)?;
     }

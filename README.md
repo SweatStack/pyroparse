@@ -592,6 +592,8 @@ Or with pip:
 pip install pyroparse
 ```
 
+Wheels cover CPython 3.10 and later on Linux (x86_64, aarch64), macOS (x86_64, arm64) and Windows (x86_64): one stable-ABI wheel per platform, so a new Python release works without a new pyroparse release.
+
 ### From source
 
 Requires a [Rust toolchain](https://rustup.rs/) and [maturin](https://www.maturin.rs/):
@@ -607,7 +609,7 @@ maturin develop --release
 Releases are automated via GitHub Actions. On tag push:
 
 1. CI runs the full test suite
-2. Wheels are built for Linux (x86_64, aarch64), macOS (x86_64, arm64), and Windows (x86_64)
+2. One stable-ABI (`abi3`) wheel is built per platform — Linux (x86_64, aarch64), macOS (x86_64, arm64), and Windows (x86_64) — and tested on every CPython listed in `[tool.cibuildwheel] build` (3.10–3.15); add the next CPython there when it is released
 3. All artifacts are published to PyPI via trusted publisher (OIDC)
 
 ```bash

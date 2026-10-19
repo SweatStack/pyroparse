@@ -1381,7 +1381,7 @@ requires-dist = [
     { name = "duckdb", marker = "extra == 'scripts'", specifier = ">=1.1" },
     { name = "httpx", marker = "extra == 'scripts'" },
     { name = "matplotlib", marker = "extra == 'scripts'" },
-    { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.5" },
+    { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.9.4" },
     { name = "open-sport-taxonomy", specifier = ">=0.10,<0.12" },
     { name = "polars", marker = "extra == 'scripts'" },
     { name = "pyarrow", specifier = ">=14.0" },
