@@ -16,6 +16,12 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
+## [Unreleased]
+
+### Fixed
+- **`load_fit_batch` and `scan_fit` parse files in parallel.** The Rust decoder held the GIL, so their threads ran one at a time.
+
+
 ## [0.10.0] - 2026-10-08
 
 ### Changed

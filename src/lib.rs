@@ -1680,7 +1680,10 @@ fn build_scan_result_dict(py: Python<'_>, scan: &ScanResult) -> PyResult<PyObjec
 
 fn do_parse(py: Python<'_>, data: &[u8], columns: Option<Vec<String>>) -> PyResult<PyObject> {
     let config = fit::decode::ParseConfig { columns };
-    let parsed = fit::decode::full_parse(data, &config)
+    // Decoding touches no Python object: release the GIL so that threads
+    // (`scan_fit`, `load_fit_batch`) parse files in parallel.
+    let parsed = py
+        .allow_threads(|| fit::decode::full_parse(data, &config))
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
     build_parse_result_dict(py, parsed)
 }
@@ -1704,7 +1707,8 @@ fn parse_fit_bytes(py: Python<'_>, data: &[u8], columns: Option<Vec<String>>) ->
 fn parse_fit_metadata(py: Python<'_>, path: &str) -> PyResult<PyObject> {
     let data = std::fs::read(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-    let result = fit::decode::scan_metadata(&data)
+    let result = py
+        .allow_threads(|| fit::decode::scan_metadata(&data))
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
     build_scan_result_dict(py, &result)
 }
