@@ -33,11 +33,19 @@ FLOAT64 = 0x89
 FILE_ID = 0
 SESSION = 18
 RECORD = 20
+EVENT = 21
 DEVICE_INFO = 23
 ACTIVITY = 34
 FIELD_DESCRIPTION = 206
 DEVELOPER_DATA_ID = 207
 TIME_IN_ZONE = 216
+
+# `event` and `event_type` enum values (Profile.xlsx, Types).
+EVENT_TIMER = 0
+EVENT_POWER_DOWN = 5
+EVENT_POWER_UP = 6
+EVENT_TYPE_START = 0
+EVENT_TYPE_STOP_ALL = 4
 
 # struct format and invalid sentinel per numeric base type (section 8).
 _NUMERIC = {
@@ -238,6 +246,13 @@ def device_info(
     ]
     b.define(local, DEVICE_INFO, fields)
     b.data(local, [index, device_type, manufacturer, serial, product, source_type, product_name])
+
+
+def timer_event(b: FitBuilder, local: int, at: datetime, event: int, event_type: int) -> None:
+    """event: ``timestamp``, ``event`` and ``event_type``. Defines *local* on
+    every call, so it may be interleaved with other messages."""
+    b.define(local, EVENT, [(253, UINT32, 4), (0, ENUM, 1), (1, ENUM, 1)])
+    b.data(local, [fit_time(at), event, event_type])
 
 
 def time_in_zone(

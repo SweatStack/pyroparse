@@ -54,7 +54,7 @@ uv run python -m pytest tests/test_activity.py -v
 uv run python -m pytest tests/test_activity.py::TestLoadFit::test_row_count -v
 ```
 
-Run both `cargo test` and `uv run python -m pytest` before pushing. The Rust tests cover parsing primitives (value conversion, field normalization, type promotion, lap assignment, device dedup). The Python tests cover end-to-end behavior.
+Run both `cargo test` and `uv run python -m pytest` before pushing. If `cargo test` fails to build because the system Python is newer than PyO3 supports, point it at the venv: `PYO3_PYTHON=.venv/bin/python cargo test`. The Rust tests cover parsing primitives (value conversion, field normalization, type promotion, lap assignment, device dedup). The Python tests cover end-to-end behavior.
 
 ## Benchmark
 
@@ -77,12 +77,15 @@ src/
 ├── fields.rs           # Field name normalization (CamelCase → snake_case)
 ├── types.rs            # TypedColumn storage, FIT→Arrow type mapping, type promotion
 ├── reference.rs        # Lookup tables: manufacturer IDs, sport IDs, ANT+ types
+├── summary.rs          # Session summary: the field table and the summarize kernel
 └── pyroparse/          # Python package
     ├── __init__.py     # Public API (read_fit, read_parquet, read_csv)
     ├── _types.py       # Shared type aliases (Source, PathSource)
     ├── _activity.py    # Activity class + FIT parsing (calls Rust directly)
     ├── _session.py     # Session class (multi-activity FIT files)
     ├── _metadata.py    # ActivityMetadata, Device, build_metadata()
+    ├── _summary.py     # SessionSummary, Athlete
+    ├── _load.py        # The loader pipeline: shape a table, complete its metadata
     ├── _schema.py      # Column definitions + selection logic
     ├── _parquet.py     # Parquet I/O with embedded metadata
     ├── _csv.py         # CSV input with metadata inference

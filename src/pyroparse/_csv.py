@@ -78,20 +78,16 @@ def _infer_metadata(table: pa.Table, promoted: dict) -> ActivityMetadata:
                 break
 
     start_time = None
-    duration = None
     if "timestamp" in columns:
         ts = table.column("timestamp").drop_null()
         if ts.length() > 0:
-            first, last = ts[0].as_py(), ts[ts.length() - 1].as_py()
+            first = pc.min(ts).as_py()
             if isinstance(first, datetime):
                 start_time = first if first.tzinfo else first.replace(tzinfo=timezone.utc)
-            if isinstance(first, datetime) and isinstance(last, datetime):
-                duration = (last - first).total_seconds()
 
     return ActivityMetadata(
         sport=promoted.get("sport"),
         name=promoted.get("name"),
         start_time=start_time,
-        duration=duration,
         metrics=metrics,
     )

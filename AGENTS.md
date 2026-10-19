@@ -94,6 +94,37 @@ local twin of that message's own `timestamp` — the *end* of the activity. Deri
 Sessions and laps carry no local time, and an offset is never guessed when the
 Activity message is missing.
 
+### Session metadata: top level, `summary`, `athlete`
+
+Every metadata field belongs to one of three places; these rules decide where
+a new field goes (plan 037):
+
+1. **Top level: what the session is.** Sport, name, start time and its local
+   offset, devices, which metrics exist, `extra` flags. `start_time` stays from
+   the file: it is not a rollup, it decides which records belong to the
+   session, and the device knows when Start was pressed.
+2. **`summary`: what happened in the session.** Rollups, the device's
+   estimates and the athlete's verdict (`rpe`, `feel`).
+3. **`athlete`: what the recording device assumed about the athlete** (max HR,
+   threshold HR; later FTP, weight). Never identity data. Values are as of the
+   session, sport-specific, possibly estimates or out of date.
+4. **Compute what we can compute accurately; take the device's value only when
+   we cannot.** A computed value has one definition for every device and
+   source and matches the table we return, including our own cleaning. Never
+   two definitions of one quantity, and never one attribute whose meaning
+   depends on how the file was opened. Known exception: `ascent`/`descent` are
+   the device's (no agreed definition; documented, may change).
+5. **The summary describes the table as loaded.** A computed field whose
+   column was not selected is `None`; only the last row of a timestamp takes
+   part (so `deduplicate` does not change it); it is not recomputed when the
+   table changes afterwards.
+
+The fields are defined once, in `SUMMARY_FIELDS` (`src/summary.rs`), which
+drives the kernel, the session decoder, `SessionSummary` and the Parquet
+`columns=` rule. Rust reads the file; Python shapes the table: the summary is
+computed in `shape` (`_load.py`), after sorting and deduplication, by the Rust
+kernel `summarize`. Every loader goes through `shape`.
+
 ### Resolve fields from the profile, not by hand
 
 Where the FIT profile says how to read a field, generate that reading from

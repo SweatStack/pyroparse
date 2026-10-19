@@ -18,9 +18,20 @@ Types of changes:
 
 ## [Unreleased]
 
+### Changed
+- **Session metadata is split into three parts** (plan 037): the top level says what the session is, `metadata.summary` what happened in it, `metadata.athlete` what the recording device assumed about the athlete. **Breaking:** `metadata.duration` → `metadata.summary.duration`, `metadata.distance` → `metadata.summary.distance`; `ActivityMetadata(duration=…, distance=…)` no longer accepts them, nor does `metadata={"duration": …}`.
+- **`duration` and `distance` are computed from the data**, not read from the device's `total_elapsed_time` and `total_distance`, so they match the table returned. `duration` runs from `start_time` to the session's last record (in a multi-session file, to the next session's start); `distance` is the column's maximum, or active lengths × pool length for a pool swim. **Behavior change:** values move by a median 0.5 s; pool swims and rides left unsaved after stopping can be minutes shorter (Garmin's elapsed clock runs on until the activity is saved: 1,082 s → 788 s for one swim).
+- **The Parquet metadata JSON** (`b"pyroparse"` key) moves `$.duration`/`$.distance` to `$.summary.*` and adds `$.summary` and `$.pyroparse_version`. It is a public contract, documented in the README; files written by earlier versions still read, their `duration` and `distance` mapped into `summary`. `to_dict()` changes the same way.
+- **`load_csv` and `read_csv` sort by `timestamp` and keep one row per timestamp (the last)**, as the FIT loaders do; `deduplicate=False` opts out. Sorted CSVs with unique timestamps are unchanged.
+- **Rows are sorted and deduplicated before column selection**, so an explicit `columns=` list without `timestamp` returns the same rows as one with it (it previously skipped both).
+- **`open_fit`: `metadata.summary` is filled when the records load** (`.data`), since it is computed from them; until then it is empty. `metrics`, `extra` and the devices' columns are refreshed at the same time, so an opened activity's metadata then equals `load_fit()`'s (the scan's `metrics` were an approximation).
+- **`scan_fit` parses each file in full**, since `duration` and `distance` are now computed from the records; its `metrics` column now matches `load_fit()`'s. Parsing releases the GIL, so files parse in parallel and a 963-file directory takes about as long as the metadata-only scan did (1.5 s against 1.3 s).
+
 ### Added
+- **`metadata.summary`** (`SessionSummary`): `duration`, `timer_time`, `distance`, and the time-weighted average and maximum of `heart_rate`, `power`, `cadence`, `speed` and `temperature`, computed from the table returned; `ascent`, `descent`, `calories`, `training_effect`, `anaerobic_training_effect`, `training_load_peak` from the device; `rpe` (0–10) and `feel` (0–100) as entered by the athlete. Averages weigh each sample by the time the timer ran until the next one, from the file's timer events; a device restart (`power_up`) ends the running time at the last record before it. A computed field is `None` when its column is not selected, and the summary is the same with `deduplicate=True` or `False`.
+- **`metadata={"summary": {…}}`** overrides merge field by field; an instance replaces.
 - **`metadata.athlete`** (`Athlete`): `max_heart_rate` and `threshold_heart_rate` the device applied to the session, from its `time_in_zone` message; sport-specific, `None` when not set (Garmin writes 0). Read by both `load_fit` and the `open_fit` scan, resolved per section in chained files, included in `to_dict()` and the Parquet metadata (`$.athlete`). `metadata={"athlete": {…}}` merges field by field; an instance replaces.
-- `docs/FIT-FORMAT.md`: `time_in_zone`, its 0 sentinel, and per-section message indices in chained files.
+- `docs/FIT-FORMAT.md`: timer group 0 events, `time_in_zone`, `workout_feel`/`workout_rpe`, the `time_in_zone` sentinel and per-section message indices in chained files.
 
 ### Fixed
 - **`load_fit_batch` and `scan_fit` parse files in parallel.** The Rust decoder held the GIL, so their threads ran one at a time.

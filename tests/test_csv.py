@@ -26,10 +26,10 @@ class TestLoadCsv:
         activity = Activity.load_csv(csv_path)
         assert activity.metadata.start_time is not None
 
-    def test_infers_duration(self, csv_path):
+    def test_computes_duration(self, csv_path):
         activity = Activity.load_csv(csv_path)
-        assert activity.metadata.duration is not None
-        assert activity.metadata.duration > 0
+        assert activity.metadata.summary.duration is not None
+        assert activity.metadata.summary.duration > 0
 
     def test_infers_metrics(self, csv_path):
         activity = Activity.load_csv(csv_path)

@@ -54,7 +54,14 @@ class TestReconstructedDistance:
         assert 0.0 <= first < 25.0
 
     def test_distance_reconciles_with_metadata(self, pool_swim):
-        assert pc.max(pool_swim.data["distance"]).as_py() == pool_swim.metadata.distance
+        assert pc.max(pool_swim.data["distance"]).as_py() == pool_swim.metadata.summary.distance
+
+    def test_summary_distance_is_whole_lengths(self, pool_swim):
+        # Active lengths × pool length, even where the last record falls
+        # before the last length ends and the column stops short.
+        summary = pool_swim.metadata.summary
+        assert summary.distance == 750.0
+        assert summary.distance % pool_swim.metadata.extra["pool_length"] == 0
 
 
 class TestReconstructedPace:

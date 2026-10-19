@@ -33,10 +33,12 @@ activity = pp.Activity.load_fit("ride.fit")
 
 activity.metadata.sport         # "cycling" (open-sport-taxonomy code)
 activity.metadata.start_time    # datetime(2024, 3, 19, 5, 30, tzinfo=UTC)
-activity.metadata.duration      # 3842.7 (seconds)
-activity.metadata.distance      # 45230.5 (meters)
 activity.metadata.metrics       # {"heart_rate", "power", "speed", "cadence", "gps"}
 activity.metadata.devices       # [Device(garmin edge_540 (creator), columns=[heart_rate,power])]
+
+activity.metadata.summary.duration        # 3842.0 (seconds, computed from the data)
+activity.metadata.summary.avg_power       # 212.4  (W, time-weighted)
+activity.metadata.summary.calories        # 1050   (the device's value)
 activity.metadata.athlete.threshold_heart_rate  # 167 (what the watch assumed)
 
 activity.data                   # pyarrow.Table — 21,666 rows × 11 typed columns
@@ -48,11 +50,13 @@ activity.data                   # pyarrow.Table — 21,666 rows × 11 typed colu
 
 ```python
 activity = pp.Activity.open_fit("ride.fit")
-activity.metadata.sport     # "cycling" — available immediately
-activity.metadata.duration  # 3842.7         — no data parsed yet
-
-activity.data               # pyarrow.Table — parsed on first access
+activity.metadata.sport             # "cycling" — available immediately
+activity.metadata.athlete           # Athlete(max_heart_rate=189, ...) — available immediately
+activity.data                       # pyarrow.Table — parsed on first access
+activity.metadata.summary.duration  # 3842.0 — computed from the records once they load
 ```
+
+From a FIT file the summary is computed from the records, so it is empty until `.data` loads them; the metadata is then filled in place and equals `load_fit()`'s. From Parquet it is stored and available immediately.
 
 ### FIT to Parquet
 
@@ -65,8 +69,8 @@ Load it back with data and metadata intact:
 
 ```python
 loaded = pp.Activity.load_parquet("ride.parquet")
-loaded.metadata.sport      # "cycling"
-loaded.metadata.distance   # 45230.5
+loaded.metadata.sport              # "cycling"
+loaded.metadata.summary.distance   # 45230.5
 loaded.data.num_rows       # 21,666
 ```
 
@@ -138,7 +142,7 @@ FIT files are a mess. `enhanced_speed` vs `speed`, semicircle-encoded GPS, manuf
 These 11 columns are the default output. Use `columns="all"` to get additional columns like `core_temperature`, `smo2`, `form_power`, and `stance_time` from CIQ apps and running dynamics, plus `length` and `swim_stroke` for pool swims (see [Swimming](#swimming)).
 
 > [!NOTE]
-> For pool swims, `distance`, `speed`, and `cadence` are **reconstructed** from FIT Length messages rather than measured — the underwater Record stream carries only heart rate. `distance` is interpolated per record and reconciles exactly with the session total; `speed` and `cadence` are per-length averages held constant across each length, not true per-second signals. See [Swimming](#swimming).
+> For pool swims, `distance`, `speed`, and `cadence` are **reconstructed** from FIT Length messages rather than measured — the underwater Record stream carries only heart rate. `distance` is interpolated per record and lands on the running total at each wall (`metadata.summary.distance` is the swim's total); `speed` and `cadence` are per-length averages held constant across each length, not true per-second signals. See [Swimming](#swimming).
 
 ### Canonical columns and developer-field mappings
 
@@ -160,7 +164,7 @@ Muscle-oxygen sensors write `0` when they have no signal, and 0 % saturation is 
 
 ### Sorted, de-duplicated by default
 
-Every FIT load returns records **sorted by `timestamp`**. By default records that share a timestamp are collapsed to one row (`deduplicate=True`, keeping the last), giving a unique, index-ready series that absorbs device backward-corrections:
+Every FIT and CSV load returns records **sorted by `timestamp`**. By default records that share a timestamp are collapsed to one row (`deduplicate=True`, keeping the last), giving a unique, index-ready series that absorbs device backward-corrections:
 
 ```python
 pp.read_fit("ride.fit")                      # sorted + deduplicated (default)
@@ -219,7 +223,7 @@ import pyroparse as pp
 activity = pp.Activity.load_fit("pool-swim.fit")
 df = pl.from_arrow(activity.data)
 
-df["distance"].max()            # 1500.0 — reconstructed, reconciles with the session total
+activity.metadata.summary.distance  # 1500.0 — active lengths × pool length
 
 # Distance per lap (interval). `distance` is cumulative, so subtract within each lap:
 df.group_by("lap").agg(
@@ -271,7 +275,7 @@ The key is absent when nothing changed. Outdoor rowing and indoor sessions witho
 
 ## Structured metadata
 
-Metadata is extracted from FIT Session and DeviceInfo messages, the same source Garmin Connect and Strava use. Sport, timestamps, duration, distance, device info, available metrics: all parsed into a typed dataclass, not left as raw dicts for you to dig through.
+One `ActivityMetadata` per session, in three parts: the top level says what the session is, `summary` what happened in it, and `athlete` what the recording device assumed about the athlete. All typed dataclasses, not raw dicts for you to dig through.
 
 ```python
 @dataclass
@@ -281,11 +285,10 @@ class ActivityMetadata:
     start_time: datetime | None     # UTC
     start_time_local: datetime | None  # naive, local wall-clock time
     utc_offset: int | None          # seconds; a read-only property, see below
-    duration: float | None          # seconds
-    distance: float | None          # meters
     metrics: set[str]               # {"heart_rate", "power", "speed", "cadence", "gps"}
     devices: list[Device]           # head unit + connected sensors
     extra: dict                     # sub_sport, anything format-specific
+    summary: SessionSummary         # what happened, see Summary
     athlete: Athlete                # what the device assumed, see Athlete
 ```
 
@@ -294,6 +297,28 @@ class ActivityMetadata:
 `metrics` lists the columns that recorded something: at least one non-null, **non-zero** value. A sensor that was connected but idle, writing only zeros, did not record its metric; the column itself is left as written. (A column that is legitimately zero on every record, such as a temperature of exactly 0 °C throughout, drops out of `metrics` too.)
 
 The `extra` dict holds format- or sport-specific fields that don't earn a top-level attribute: `sub_sport` (e.g. `"lap_swimming"`); for pool swims, `pool_length` (metres) and `reconstructed_columns` (which record columns were derived from Length messages rather than measured; see [Swimming](#swimming)); and for indoor rowing, `cleaned_columns` (see [Rowing](#rowing)).
+
+### Summary
+
+**Computed from the data** wherever that can be done accurately, so a value has one definition for every device and every source (FIT or CSV) and matches the table you get, including pyroparse's own cleaning (rowing rests set to 0, pool distance reconstructed). A device's own `avg_power` for a rowing session or `avg_speed` for a pool swim does not match that table; these do.
+
+| Field | Definition |
+|---|---|
+| `duration` | seconds from `start_time` to the session's end: its last record, or in a multi-session file the next session's start |
+| `timer_time` | seconds the timer ran, from the file's timer events; `None` without them (CSV, some devices) |
+| `distance` | the maximum of the `distance` column (m); for a pool swim, active lengths × pool length |
+| `avg_heart_rate`, `avg_power`, `avg_cadence`, `avg_speed`, `avg_temperature` | time-weighted mean over the time the timer ran |
+| `max_heart_rate`, `max_power`, `max_cadence`, `max_speed`, `max_temperature` | maximum of the column |
+
+Each sample counts until the next one, so smart recording's uneven intervals weigh correctly and a gap carries the last value. A pause (timer stopped) does not count; zeros count (a stop is 0) and nulls are skipped. A device restart mid-activity, which the watch records as a `power_up` event, ends the running time at the last record before it. A CSV has no timer events, so all its time counts: a stop that an export dropped holds the last value through the gap.
+
+The summary describes the table returned: a computed field whose column you did not select (`columns=`) is `None`, and only the last row of a timestamp takes part, so it is the same with `deduplicate=True` or `False`. It is computed when the file loads and does not follow later changes to the table.
+
+The values differ slightly from what the device reports: median 0.5 s for `timer_time`, 0.25 bpm for average heart rate, 0.4 W for average power (FIT timestamps are whole seconds; devices average higher-rate data, and many leave zeros out of cadence). `duration` can be minutes shorter than the device's elapsed time: Garmin keeps that clock running after you stop the timer until you save (in pool mode it writes a short idle length at save time), and the records end when you stopped.
+
+**From the device**, because they cannot be computed accurately: `ascent` and `descent` (m), `calories` (kcal), `training_effect` and `anaerobic_training_effect` (0–5, Firstbeat), `training_load_peak` (Garmin's). Ascent and descent would need a smoothing and a threshold on which no definition agrees, and the device's number is what athletes see in their apps; this may change, as a breaking change, if a defensible definition emerges.
+
+**Entered by the athlete** after the activity: `rpe` (0–10, Borg CR10) and `feel` (0–100, low is bad; Garmin's five levels are `feel // 25 + 1`; 0 is a valid answer).
 
 ### Athlete
 
@@ -332,14 +357,15 @@ Connect IQ apps that wrote data appear in `devices` with `device_type="developer
 
 Manual overrides merge on top of file-native values. A `sport` override is
 validated against the taxonomy, so a typo fails loudly instead of silently
-entering your data:
+entering your data. `summary` and `athlete` merge field by field:
 
 ```python
 activity = pp.Activity.load_fit("ride.fit", metadata={"sport": "cycling.gravel"})
-activity.metadata.sport       # "cycling.gravel" (overridden)
-activity.metadata.duration    # 3842.7           (preserved from FIT)
+activity.metadata.sport                 # "cycling.gravel" (overridden)
+activity.metadata.summary.duration      # 3842.0           (preserved)
 
-pp.Activity.load_fit("ride.fit", metadata={"athlete": {"threshold_heart_rate": 170}})  # merges
+pp.Activity.load_csv("ride.csv", metadata={"summary": {"calories": 900}})
+pp.Activity.load_fit("ride.fit", metadata={"athlete": {"threshold_heart_rate": 170}})
 pp.Activity.load_fit("ride.fit", metadata={"sport": "gravel"})  # ValueError: invalid sport
 ```
 
@@ -372,12 +398,27 @@ when present.
 `to_parquet()` writes ZSTD-compressed Parquet with metadata embedded in the Arrow schema under the `b"pyroparse"` key. This means you can scan metadata across thousands of files without reading row data:
 
 ```sql
--- DuckDB: find all cycling activities
-SELECT filename, json_extract_string(value, '$.sport') AS sport
+-- DuckDB: total hours of cycling
+SELECT sum(json_extract(value, '$.summary.duration')::DOUBLE) / 3600 AS hours
 FROM parquet_kv_metadata('activities/*.parquet')
 WHERE key = 'pyroparse'
   AND json_extract_string(value, '$.sport') = 'cycling';
 ```
+
+The JSON is a public contract, read by any tool, so it holds everything, computed values included:
+
+```json
+{
+  "sport": "cycling", "name": null, "start_time": "2024-03-19T05:30:00+00:00",
+  "start_time_local": "2024-03-19T06:30:00", "utc_offset": 3600,
+  "metrics": ["cadence", "heart_rate", "power"], "devices": [...], "extra": {},
+  "summary": {"duration": 3842.0, "timer_time": 3790.0, "avg_power": 212.4, "calories": 1050, "...": "..."},
+  "athlete": {"max_heart_rate": 189, "threshold_heart_rate": 167},
+  "pyroparse_version": "0.11.0"
+}
+```
+
+The layout changes only in a pyroparse release (see the CHANGELOG), and only by adding keys within a layout. Tell layouts apart by key: `$.summary` exists from 0.11 on; earlier files have `$.duration` and `$.distance` at the top level, which pyroparse still reads into `summary`. pyroparse reads the stored values rather than recomputing them, so every reader sees the same numbers.
 
 ---
 
@@ -388,7 +429,7 @@ Scan a directory of `.fit` or `.parquet` files, filter by metadata, load only wh
 ```python
 import pyroparse as pp
 
-# Scan: metadata only, no timeseries parsing (fast)
+# Scan: one row per file, parsed in parallel (~1.5 s per 1,000 files)
 catalog = pp.scan_fit("~/data/activities/")
 # file_path | sport | start_time | duration | distance | metrics | ...
 

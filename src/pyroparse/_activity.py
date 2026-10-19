@@ -9,8 +9,8 @@ from pyroparse._core import parse_fit as _parse_fit
 from pyroparse._core import parse_fit_bytes as _parse_fit_bytes
 from pyroparse._core import parse_fit_metadata as _parse_fit_metadata
 from pyroparse._errors import FileTypeMismatchError, MultipleActivitiesError
+from pyroparse._load import complete_for_columns, load_fit_activity, shape
 from pyroparse._metadata import ActivityMetadata, _build_metadata, _merge_metadata
-from pyroparse._rows import finalize_rows
 from pyroparse._schema import select_columns
 from pyroparse._types import PathSource, Source
 
@@ -50,18 +50,11 @@ def _build_rust_column_hint(
     return None
 
 
-def _filter_device_columns(meta: ActivityMetadata, data: pa.Table) -> None:
-    """Trim device.columns to only include columns present in the data table."""
-    available = set(data.column_names)
-    for device in meta.devices:
-        device.columns = [c for c in device.columns if c in available]
-
-
 class Activity:
     """A single parsed activity with data and metadata.
 
-    Created via ``load_*()`` (eager) or ``open_*()`` (lazy).
-    For lazy activities, data is loaded on first ``.data`` access.
+    Created via ``load_*()`` (eager) or ``open_*()`` (lazy). An opened
+    activity loads its records on first access to ``.data``.
     """
 
     __slots__ = ("_data", "_metadata", "_loader")
@@ -106,21 +99,11 @@ class Activity:
         # Build a Rust-side column hint to skip decoding unwanted fields.
         # None = decode everything, list = decode only these columns.
         rust_columns = _build_rust_column_hint(columns, extra_columns)
-        raw = _call_parser(source, rust_columns)
-        file_type = raw.get("file_type")
-        if file_type is not None and file_type != "activity":
-            raise FileTypeMismatchError("activity", file_type)
-        activities = raw["activities"]
-        if len(activities) > 1:
-            raise MultipleActivitiesError(len(activities))
-
-        raw_activity = activities[0]
-        data = pa.Table.from_batches([raw_activity["records"]])
-        file_meta = _build_metadata(raw_activity["metadata"])
-        meta = _merge_metadata(file_meta, metadata)
-        data = select_columns(data, columns, extra_columns, missing)
-        data = finalize_rows(data, deduplicate=deduplicate)
-        _filter_device_columns(meta, data)
+        raw = _single_activity(_call_parser(source, rust_columns))
+        data, meta = load_fit_activity(
+            raw, columns=columns, extra_columns=extra_columns, missing=missing,
+            deduplicate=deduplicate, overrides=metadata,
+        )
         return cls(data, meta)
 
     @classmethod
@@ -136,10 +119,10 @@ class Activity:
         from pyroparse._parquet import read_parquet
 
         data, file_meta = read_parquet(source)
-        data = select_columns(data, columns, extra_columns, missing)
-        meta = _merge_metadata(file_meta, metadata)
-        _filter_device_columns(meta, data)
-        return cls(data, meta)
+        data = shape(
+            data, file_meta, columns=columns, extra_columns=extra_columns, missing=missing,
+        )
+        return cls(data, _merge_metadata(file_meta, metadata))
 
     @classmethod
     def load_csv(
@@ -149,15 +132,21 @@ class Activity:
         columns: list[str] | str | None = None,
         extra_columns: list[str] | None = None,
         missing: str = "raise",
+        deduplicate: bool = True,
         metadata: dict | None = None,
     ) -> Activity:
+        """Load a CSV file. Rows are sorted by ``timestamp`` and, with
+        ``deduplicate=True`` (default), one row is kept per timestamp — the
+        last — as for FIT. A CSV has no timer events, so a gap in it counts
+        as running time in the summary's averages."""
         from pyroparse._csv import read_csv
 
         data, inferred = read_csv(source)
-        data = select_columns(data, columns, extra_columns, missing)
-        meta = _merge_metadata(inferred, metadata)
-        _filter_device_columns(meta, data)
-        return cls(data, meta)
+        data = shape(
+            data, inferred, columns=columns, extra_columns=extra_columns, missing=missing,
+            deduplicate=deduplicate, summary_inputs={},
+        )
+        return cls(data, _merge_metadata(inferred, metadata))
 
     # -- Lazy loaders ----------------------------------------------------------
 
@@ -172,32 +161,31 @@ class Activity:
         deduplicate: bool = True,
         metadata: dict | None = None,
     ) -> Activity:
-        """Load metadata now, defer record data until ``.data`` is accessed.
+        """Read the metadata now; load the records on first access to
+        ``.data``.
+
+        The top level and ``athlete`` come from a fast metadata scan. The
+        summary is computed from the records, so it is empty until they load;
+        then the metadata is filled in place and equals ``load_fit``'s.
 
         Experimental: uses a custom binary FIT scanner that may not handle
         all edge cases. Metadata values should be validated against
         ``load_fit()`` for critical workflows.
         """
         resolved = str(os.fspath(path))
-        raw = _parse_fit_metadata(resolved)
-        file_type = raw.get("file_type")
-        if file_type is not None and file_type != "activity":
-            raise FileTypeMismatchError("activity", file_type)
-        activities = raw["activities"]
-        if len(activities) > 1:
-            raise MultipleActivitiesError(len(activities))
-
-        file_meta = _build_metadata(activities[0]["metadata"])
-        file_meta = _merge_metadata(file_meta, metadata)
+        raw = _single_activity(_parse_fit_metadata(resolved))
+        meta = _merge_metadata(_build_metadata(raw["metadata"]), metadata)
 
         def loader() -> pa.Table:
-            data, _ = _parse_single(resolved)
-            data = select_columns(data, columns, extra_columns, missing)
-            data = finalize_rows(data, deduplicate=deduplicate)
-            _filter_device_columns(file_meta, data)
+            data, loaded = load_fit_activity(
+                _single_activity(_call_parser(resolved)),
+                columns=columns, extra_columns=extra_columns, missing=missing,
+                deduplicate=deduplicate, overrides=metadata,
+            )
+            meta._fill(loaded)
             return data
 
-        return cls(None, file_meta, _loader=loader)
+        return cls(None, meta, _loader=loader)
 
     @classmethod
     def open_parquet(
@@ -209,18 +197,21 @@ class Activity:
         missing: str = "raise",
         metadata: dict | None = None,
     ) -> Activity:
-        """Load schema metadata now, defer row data until ``.data`` is accessed."""
-        from pyroparse._parquet import read_parquet, read_parquet_metadata
+        """Read the metadata now, including the stored summary; load the rows
+        on first access to ``.data``."""
+        from pyroparse._parquet import read_parquet, read_parquet_schema
 
         resolved = os.fspath(path)
-        file_meta = read_parquet_metadata(resolved)
+        schema, file_meta = read_parquet_schema(resolved)
+        # The summary describes the table that will load: fit it to the
+        # selected columns now, from the schema, without reading rows.
+        selected = select_columns(schema.empty_table(), columns, extra_columns, "ignore")
+        complete_for_columns(file_meta, selected.column_names)
         merged = _merge_metadata(file_meta, metadata)
 
         def loader() -> pa.Table:
             data, _ = read_parquet(resolved)
-            data = select_columns(data, columns, extra_columns, missing)
-            _filter_device_columns(merged, data)
-            return data
+            return select_columns(data, columns, extra_columns, missing)
 
         return cls(None, merged, _loader=loader)
 
@@ -248,23 +239,11 @@ def _check_file_type(raw: dict) -> None:
         raise FileTypeMismatchError("activity", file_type)
 
 
-def _parse_single(source: Source) -> tuple[pa.Table, ActivityMetadata]:
-    """Parse a single-activity FIT source, returning (data, metadata)."""
-    raw = _call_parser(source)
+def _single_activity(raw: dict) -> dict:
+    """The one activity of a parser result; raise for other file types and
+    for multi-activity files."""
     _check_file_type(raw)
     activities = raw["activities"]
     if len(activities) > 1:
         raise MultipleActivitiesError(len(activities))
-    a = activities[0]
-    data = pa.Table.from_batches([a["records"]])
-    return data, _build_metadata(a["metadata"])
-
-
-def _parse_multi(source: Source) -> list[tuple[pa.Table, ActivityMetadata]]:
-    """Parse a multi-activity FIT source, returning list of (data, metadata)."""
-    raw = _call_parser(source)
-    _check_file_type(raw)
-    return [
-        (pa.Table.from_batches([a["records"]]), _build_metadata(a["metadata"]))
-        for a in raw["activities"]
-    ]
+    return activities[0]

@@ -9,7 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from pyroparse._metadata import ActivityMetadata, Device
-from pyroparse._summary import Athlete
+from pyroparse._summary import Athlete, SessionSummary
 from pyroparse._types import Source
 
 _METADATA_KEY = b"pyroparse"
@@ -68,11 +68,16 @@ def read_parquet(
 
 def read_parquet_metadata(path: str | os.PathLike[str]) -> ActivityMetadata:
     """Read only the Parquet schema footer — no row data loaded."""
+    return read_parquet_schema(path)[1]
+
+
+def read_parquet_schema(path: str | os.PathLike[str]) -> tuple[pa.Schema, ActivityMetadata]:
+    """Read the schema footer: the columns and the pyroparse metadata."""
     schema = pq.read_schema(str(os.fspath(path)))
     meta = schema.metadata or {}
     if _METADATA_KEY in meta:
-        return _json_to_metadata(meta[_METADATA_KEY])
-    return ActivityMetadata()
+        return schema, _json_to_metadata(meta[_METADATA_KEY])
+    return schema, ActivityMetadata()
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +85,14 @@ def read_parquet_metadata(path: str | os.PathLike[str]) -> ActivityMetadata:
 # ---------------------------------------------------------------------------
 
 def _metadata_to_json(meta: ActivityMetadata) -> bytes:
-    return json.dumps(meta.to_dict()).encode()
+    """The metadata as the JSON stored under the ``pyroparse`` schema key: a
+    public contract, read by DuckDB, Polars and others (see the README). It
+    changes only in a pyroparse release, additively within a layout;
+    ``pyroparse_version`` names the writer, and readers detect a layout by key
+    (``$.summary`` exists from 0.11 on)."""
+    from pyroparse import __version__
+
+    return json.dumps({**meta.to_dict(), "pyroparse_version": __version__}).encode()
 
 
 def _json_to_metadata(raw: bytes) -> ActivityMetadata:
@@ -107,15 +119,20 @@ def _json_to_metadata(raw: bytes) -> ActivityMetadata:
         for d in data.get("devices", [])
     ]
 
+    # Files written before 0.11 carry `duration` and `distance` at the top
+    # level and no summary.
+    summary = data.get("summary")
+    if summary is None:
+        summary = {"duration": data.get("duration"), "distance": data.get("distance")}
+
     return ActivityMetadata(
         sport=data.get("sport"),
         name=data.get("name"),
         start_time=start_time,
         start_time_local=start_time_local,
-        duration=data.get("duration"),
-        distance=data.get("distance"),
         metrics=set(data.get("metrics", [])),
         devices=devices,
         extra=data.get("extra", {}),
+        summary=SessionSummary._from_dict(summary),
         athlete=Athlete._from_dict(data.get("athlete")),
     )

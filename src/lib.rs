@@ -1,6 +1,7 @@
 mod fields;
 mod fit;
 pub(crate) mod reference;
+mod summary;
 mod types;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -316,12 +317,13 @@ pub(crate) struct SessionMeta {
     pub(crate) name: Option<String>,
     pub(crate) start_time: Option<f64>,
     pub(crate) start_time_local: Option<f64>,
-    pub(crate) duration: Option<f64>,
-    pub(crate) distance: Option<f64>,
     /// Pool length in metres (Session field 44), present only for pool swims.
     /// Anchors per-record distance reconstruction — see [`assign_lengths`].
     pub(crate) pool_length: Option<f64>,
     pub(crate) start_timestamp_us: Option<i64>,
+    /// The device and athlete-entered summary fields (see `summary.rs`), by
+    /// attribute name. Full parse only.
+    pub(crate) summary: Vec<(&'static str, summary::Value)>,
     pub(crate) athlete: AthleteMeta,
 }
 
@@ -404,6 +406,9 @@ pub(crate) struct ParseResult {
     pub(crate) lengths: Vec<LengthInterval>,
     /// CIQ app UUIDs by slot, as referenced by `RecordRow::*_app`.
     pub(crate) apps: Vec<String>,
+    /// The file's running intervals (see `running_intervals`); `None` when it
+    /// has no timer events.
+    pub(crate) running: Option<Vec<summary::Interval>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +514,10 @@ struct LengthColumns {
     cadence: Vec<Option<i16>>,
     stroke: Vec<Option<String>>,
     index: Vec<i16>,
+    /// Active lengths × `pool_length`: the swim's distance. The `distance`
+    /// column interpolates within each length and the last record falls
+    /// before the last length ends, so its maximum can stop short of this.
+    total_distance: Option<f64>,
 }
 
 /// Reconstruct `distance`/`speed`/`cadence`/`swim_stroke`/`length` for each
@@ -521,8 +530,10 @@ struct LengthColumns {
 /// *active* length distance ramps linearly by elapsed-time fraction: the unique
 /// representation consistent with a piecewise-constant `speed` (`distance′ =
 /// speed`). Distance is anchored on the running active-length count times
-/// `pool_length`, so it is monotone non-decreasing and its maximum equals
-/// `session.total_distance` exactly. See `plans/029-POOL-SWIM-DISTANCE.md`.
+/// `pool_length`, so it is monotone non-decreasing and lands on the running
+/// total at each wall; the last record can fall before the last length ends,
+/// so the swim's total is `LengthColumns::total_distance`. See
+/// `plans/029-POOL-SWIM-DISTANCE.md`.
 fn assign_lengths(
     records: &[RecordRow],
     lengths: &[LengthInterval],
@@ -616,7 +627,9 @@ fn assign_lengths(
         }
     }
 
-    LengthColumns { distance, speed, cadence, stroke, index }
+    let total_distance =
+        pool_length.map(|pool| lengths.iter().filter(|l| l.active).count() as f64 * pool);
+    LengthColumns { distance, speed, cadence, stroke, index, total_distance }
 }
 
 /// Re-anchor a later session's cumulative `distance` at zero.
@@ -736,7 +749,7 @@ fn build_batch(
     laps: &[LapBoundary],
     lengths: &[LengthInterval],
     pool_length: Option<f64>,
-) -> PyResult<(RecordBatch, Vec<String>)> {
+) -> PyResult<(RecordBatch, Reconstruction)> {
     // Pool-swim reconstruction. Present only when the file has Length messages.
     let recon = if lengths.is_empty() {
         None
@@ -889,7 +902,17 @@ fn build_batch(
 
     let batch = RecordBatch::try_new(Arc::new(schema), arrays)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    Ok((batch, reconstructed_columns))
+    let distance = if reconstruct_distance { recon.and_then(|r| r.total_distance) } else { None };
+    Ok((batch, Reconstruction { columns: reconstructed_columns, distance }))
+}
+
+/// What pool-swim reconstruction produced for one batch.
+struct Reconstruction {
+    /// Columns reconstructed from Length messages.
+    columns: Vec<String>,
+    /// The swim's distance when `distance` was reconstructed (see
+    /// `LengthColumns::total_distance`).
+    distance: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -959,14 +982,24 @@ fn session_to_dict<'py>(
     dict.set_item("name", session.name.as_deref())?;
     dict.set_item("start_time", session.start_time)?;
     dict.set_item("start_time_local", session.start_time_local)?;
-    dict.set_item("duration", session.duration)?;
-    dict.set_item("distance", session.distance)?;
     dict.set_item("pool_length", session.pool_length)?;
+    let summary = PyDict::new_bound(py);
+    for &(name, value) in &session.summary {
+        set_value(&summary, name, value)?;
+    }
+    dict.set_item("summary", summary)?;
     let athlete = PyDict::new_bound(py);
     athlete.set_item("max_heart_rate", session.athlete.max_heart_rate)?;
     athlete.set_item("threshold_heart_rate", session.athlete.threshold_heart_rate)?;
     dict.set_item("athlete", athlete)?;
     Ok(dict)
+}
+
+fn set_value(dict: &Bound<'_, PyDict>, name: &str, value: summary::Value) -> PyResult<()> {
+    match value {
+        summary::Value::Int(v) => dict.set_item(name, v),
+        summary::Value::Float(v) => dict.set_item(name, v),
+    }
 }
 
 fn device_to_dict<'py>(
@@ -1012,6 +1045,7 @@ struct ColumnNotes<'a> {
     cleaned: &'a [String],
 }
 
+
 fn build_activity_dict<'py>(
     py: Python<'py>,
     batch: &RecordBatch,
@@ -1019,6 +1053,7 @@ fn build_activity_dict<'py>(
     devices: &[DeviceMeta],
     developer_sensors: &[DeveloperSensor],
     columns: &ColumnNotes,
+    inputs: &SummaryInputs,
 ) -> PyResult<Bound<'py, PyDict>> {
 
     let activity = PyDict::new_bound(py);
@@ -1032,8 +1067,7 @@ fn build_activity_dict<'py>(
         None => {
             let d = PyDict::new_bound(py);
             for key in [
-                "sport", "sub_sport", "name", "start_time", "start_time_local",
-                "duration", "distance", "pool_length",
+                "sport", "sub_sport", "name", "start_time", "start_time_local", "pool_length",
             ] {
                 d.set_item(key, py.None())?;
             }
@@ -1055,7 +1089,22 @@ fn build_activity_dict<'py>(
     meta.set_item("developer_sensors", sensors_list)?;
 
     activity.set_item("metadata", meta)?;
+
+    let summary_inputs = PyDict::new_bound(py);
+    summary_inputs.set_item("start", session.and_then(|s| s.start_timestamp_us))?;
+    summary_inputs.set_item("end", inputs.end)?;
+    summary_inputs.set_item("running", inputs.running)?;
+    summary_inputs.set_item("pool_distance", inputs.pool_distance)?;
+    activity.set_item("summary_inputs", summary_inputs)?;
     Ok(activity)
+}
+
+/// What `summarize` needs about one session beyond its records.
+struct SummaryInputs<'a> {
+    /// The next session's start in a multi-session file: where this one ends.
+    end: Option<i64>,
+    running: Option<&'a [summary::Interval]>,
+    pool_distance: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1474,7 +1523,7 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
         let dev_won = resolve_merge(&mut parsed.records);
         let cleaned = clean_rowing_rests(&mut parsed.records, parsed.sessions.first());
         let pool_length = parsed.sessions.first().and_then(|s| s.pool_length);
-        let (batch, reconstructed) = build_batch(
+        let (batch, reconstruction) = build_batch(
             &parsed.records, &parsed.extra_col_info, &parsed.extra_data, &parsed.laps,
             &parsed.lengths, pool_length,
         )?;
@@ -1492,7 +1541,8 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             parsed.sessions.first(),
             &devices,
             &sensors,
-            &ColumnNotes { metrics: &metrics, reconstructed: &reconstructed, cleaned: &cleaned },
+            &ColumnNotes { metrics: &metrics, reconstructed: &reconstruction.columns, cleaned: &cleaned },
+            &SummaryInputs { end: None, running: parsed.running.as_deref(), pool_distance: reconstruction.distance },
         )?)?;
     } else {
         // Multi-session: slice records per session, merge each independently.
@@ -1573,7 +1623,7 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
             // Rebuild fixed columns (+ canonical extras, incl. pool-swim
             // reconstruction) from the now-resolved records.  Dynamic extras come
             // from the pre-built batch via slice.
-            let (session_batch, reconstructed) = build_batch(
+            let (session_batch, reconstruction) = build_batch(
                 session_records, &[], &[], &session_laps,
                 &session_lengths, session.pool_length,
             )?;
@@ -1593,7 +1643,12 @@ fn build_parse_result_dict(py: Python<'_>, mut parsed: ParseResult) -> PyResult<
                 Some(session),
                 &devices,
                 &sensors,
-                &ColumnNotes { metrics: &metrics, reconstructed: &reconstructed, cleaned: &cleaned },
+                &ColumnNotes { metrics: &metrics, reconstructed: &reconstruction.columns, cleaned: &cleaned },
+                &SummaryInputs {
+                    end: (si + 1 < n_sessions).then_some(window_end),
+                    running: parsed.running.as_deref(),
+                    pool_distance: reconstruction.distance,
+                },
             )?)?;
         }
     }
@@ -1654,8 +1709,7 @@ fn build_scan_result_dict(py: Python<'_>, scan: &ScanResult) -> PyResult<PyObjec
             Some(s) => session_to_dict(py, s)?,
             None => {
                 let d = PyDict::new_bound(py);
-                for key in ["sport", "sub_sport", "name", "start_time", "start_time_local",
-                             "duration", "distance"] {
+                for key in ["sport", "sub_sport", "name", "start_time", "start_time_local"] {
                     d.set_item(key, py.None())?;
                 }
                 d
@@ -1818,8 +1872,41 @@ fn parse_course_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
     do_parse_course(py, data)
 }
 
+/// The computed summary fields of a shaped record table (see
+/// `summary::summarize`), as a dict holding the fields that have a value.
+#[pyfunction]
+#[pyo3(signature = (table, start=None, end=None, running=None, pool_distance=None))]
+fn summarize(
+    py: Python<'_>,
+    table: pyo3_arrow::PyTable,
+    start: Option<i64>,
+    end: Option<i64>,
+    running: Option<Vec<summary::Interval>>,
+    pool_distance: Option<f64>,
+) -> PyResult<PyObject> {
+    let (batches, schema) = table.into_inner();
+    let batch = summary::single_batch(&schema, &batches)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let values = summary::summarize(&batch, start, end, running.as_deref(), pool_distance)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let dict = PyDict::new_bound(py);
+    for (name, value) in values {
+        set_value(&dict, name, value)?;
+    }
+    Ok(dict.into_any().unbind())
+}
+
+/// The summary fields as `(name, kind, source)`, in declaration order (see
+/// `summary::SUMMARY_FIELDS`).
+#[pyfunction]
+fn summary_fields() -> Vec<(&'static str, &'static str, &'static str)> {
+    summary::SUMMARY_FIELDS.iter().map(|f| (f.name, f.kind.as_str(), f.source)).collect()
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(summarize, m)?)?;
+    m.add_function(wrap_pyfunction!(summary_fields, m)?)?;
     m.add_function(wrap_pyfunction!(parse_fit, m)?)?;
     m.add_function(wrap_pyfunction!(parse_fit_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(parse_fit_metadata, m)?)?;

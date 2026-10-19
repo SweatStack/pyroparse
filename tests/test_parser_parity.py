@@ -67,31 +67,6 @@ class TestSessionParity:
             )
 
     @pytest.mark.parametrize("filename,expected_count", FIXTURE_FILES)
-    def test_duration(self, filename, expected_count):
-        full, scan = _parse_both(filename)
-        for i in range(len(full)):
-            f_dur = full[i]["metadata"]["duration"]
-            s_dur = scan[i]["metadata"]["duration"]
-            if f_dur is None and s_dur is None:
-                continue
-            assert f_dur == pytest.approx(s_dur, rel=1e-3), (
-                f"{filename} activity {i}: duration mismatch ({f_dur} vs {s_dur})"
-            )
-
-    @pytest.mark.parametrize("filename,expected_count", FIXTURE_FILES)
-    def test_distance(self, filename, expected_count):
-        full, scan = _parse_both(filename)
-        for i in range(len(full)):
-            f_dist = full[i]["metadata"]["distance"]
-            s_dist = scan[i]["metadata"]["distance"]
-            if f_dist is None and s_dist is None:
-                continue
-            assert f_dist == pytest.approx(s_dist, rel=1e-3), (
-                f"{filename} activity {i}: distance mismatch ({f_dist} vs {s_dist})"
-            )
-
-
-    @pytest.mark.parametrize("filename,expected_count", FIXTURE_FILES)
     def test_athlete(self, filename, expected_count):
         # Both parsers read time_in_zone, so open_fit's athlete is load_fit's.
         full, scan = _parse_both(filename)

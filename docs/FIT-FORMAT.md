@@ -1032,8 +1032,14 @@ One per activity (or per sport in multi-sport files).
 | 7 | total_elapsed_time | uint32 | 1000 | s |
 | 8 | total_timer_time | uint32 | 1000 | s |
 | 9 | total_distance | uint32 | 100 | m |
+| 192 | workout_feel | uint8 | 1 | 0–100, low is bad |
+| 193 | workout_rpe | uint8 | 1 | Borg CR10 × 10 (the profile's description; no scale) |
 
 The session message has no local-time field; see [activity](#activity-global-34).
+pyroparse computes elapsed time, timer time and distance from the records and
+timer events rather than reading fields 7–9 (plan 037); Garmin's
+`total_elapsed_time` keeps running after the timer stops until the activity
+is saved.
 
 ### device_info (global #23)
 
@@ -1126,6 +1132,16 @@ Timer start/stop, gear changes, recovery HR measurements.
 | 0 | event | enum | — | — |
 | 1 | event_type | enum | — | — |
 | 3 | data | uint32 | — | — |
+
+**Timer group 0.** The profile (Types → `event`) puts three events in timer
+group 0: `timer` ("Group 0. Start / stop_all"), `power_down` and `power_up`
+(both "stop_all group 0"). A FIT file has one timer: a `timer` `start` begins
+a running interval and any group-0 stop ends it, regardless of session
+boundaries — in a multisport file one interval typically spans several
+sessions, so running time is cut per session. `power_up` is written when the
+device restarts after a crash or power loss, so the stop it marks happened at
+an unrecorded moment before it; the last record before it is the best bound.
+Zwift writes its final `stop_all` while saving, after the last record.
 
 ### time_in_zone (global #216)
 

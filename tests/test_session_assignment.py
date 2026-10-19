@@ -9,11 +9,20 @@ from pathlib import Path
 
 import pytest
 
-from pyroparse import Session
+from pyroparse import Session, all_messages
 
 FIXTURES = Path(__file__).parent / "fixtures"
 RAPID = FIXTURES / "cycling-running-rapid-9session.fit"
 FOUR = FIXTURES / "cycling-rowing-cycling-rowing.fit"
+
+
+def device_sessions(path):
+    """The device's own Session totals, straight from the file."""
+    return [
+        {f["name"]: f["value"] for f in m["fields"]}
+        for m in all_messages(path)
+        if m["kind"] == "session"
+    ]
 
 
 class TestRapidAlternation:
@@ -45,12 +54,25 @@ class TestNoBoundaryDoubleCount:
 
 
 class TestSessionDuration:
-    """§2: `duration` is `total_elapsed_time` (field 7), not `total_timer_time` (8)."""
+    """`duration` is elapsed time, `timer_time` the time the timer ran, both
+    computed per session: a FIT file has one timer, whose running intervals
+    span sessions (plan 037)."""
+
+    @pytest.mark.parametrize("path", [RAPID, FOUR], ids=lambda p: p.name)
+    def test_each_session_matches_the_device(self, path):
+        # Event and record timestamps are whole seconds while the device's
+        # timer counts milliseconds; a session with a pause has several such
+        # boundaries.
+        for i, (a, device) in enumerate(zip(Session.load_fit(path).activities, device_sessions(path))):
+            summary = a.metadata.summary
+            assert summary.timer_time == pytest.approx(device["total_timer_time"], abs=2), i
+            assert summary.duration == pytest.approx(device["total_elapsed_time"], abs=2), i
 
     def test_duration_is_elapsed_not_timer(self):
-        acts = Session.load_fit(RAPID).activities
+        summary = Session.load_fit(RAPID).activities[0].metadata.summary
         # session 0: total_elapsed_time=1632.641, total_timer_time=1133.29
-        assert acts[0].metadata.duration == pytest.approx(1632.641, abs=0.01)
+        assert summary.duration == pytest.approx(1632.641, abs=2)
+        assert summary.timer_time == pytest.approx(1133.29, abs=2)
 
 
 class TestLapsRetained:
@@ -83,10 +105,12 @@ class TestSessionDistance:
             assert 0 <= self._distances(a)[0] < 5, f"activity {i}"
 
     def test_carried_over_distance_reconciles_with_session_total(self):
-        for i, a in enumerate(Session.load_fit(RAPID).activities):
-            assert max(self._distances(a)) == pytest.approx(a.metadata.distance, abs=0.5), (
+        acts = Session.load_fit(RAPID).activities
+        for i, (a, device) in enumerate(zip(acts, device_sessions(RAPID))):
+            assert max(self._distances(a)) == pytest.approx(device["total_distance"], abs=0.5), (
                 f"activity {i}"
             )
+            assert a.metadata.summary.distance == max(self._distances(a))
 
     def test_distance_stays_monotone(self):
         for a in Session.load_fit(RAPID).activities:

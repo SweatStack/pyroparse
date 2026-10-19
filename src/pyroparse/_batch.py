@@ -9,6 +9,7 @@ from pathlib import Path
 import pyarrow as pa
 
 from pyroparse._activity import Activity
+from pyroparse._metadata import ActivityMetadata
 
 # ---------------------------------------------------------------------------
 # Catalog schema (shared by scan_fit and scan_parquet)
@@ -40,8 +41,10 @@ def scan_fit(
 ) -> pa.Table:
     """Scan a directory for ``.fit`` files and return a catalog table.
 
-    Each row represents one file.  Only metadata is read — no timeseries
-    data is parsed, making this very fast even for large directories.
+    Each row represents one file, with its metadata as ``load_fit`` returns
+    it. ``duration`` and ``distance`` are the summary's, computed from the
+    records, so each file is parsed in full (about 4 ms; files are parsed in
+    parallel).
 
     Parameters
     ----------
@@ -87,8 +90,11 @@ def scan_fit(
 
 
 def _scan_one(path: Path) -> dict:
-    activity = Activity.open_fit(path)
-    meta = activity.metadata
+    return _catalog_row(path, Activity.load_fit(path).metadata)
+
+
+def _catalog_row(path: Path, meta: ActivityMetadata) -> dict:
+    """One catalog row: the same columns for FIT and Parquet."""
     creator = next(
         (d for d in meta.devices if d.device_type == "creator"), None
     )
@@ -98,8 +104,8 @@ def _scan_one(path: Path) -> dict:
         "name": meta.name,
         "start_time": meta.start_time,
         "start_time_local": meta.start_time_local,
-        "duration": meta.duration,
-        "distance": meta.distance,
+        "duration": meta.summary.duration,
+        "distance": meta.summary.distance,
         "metrics": sorted(meta.metrics) if meta.metrics else None,
         "device_name": creator.name if creator else None,
         "device_type": creator.device_type if creator else None,
@@ -169,22 +175,7 @@ def scan_parquet(
 def _scan_one_parquet(path: Path) -> dict:
     from pyroparse._parquet import read_parquet_metadata
 
-    meta = read_parquet_metadata(path)
-    creator = next(
-        (d for d in meta.devices if d.device_type == "creator"), None
-    )
-    return {
-        "file_path": str(path),
-        "sport": meta.sport,
-        "name": meta.name,
-        "start_time": meta.start_time,
-        "start_time_local": meta.start_time_local,
-        "duration": meta.duration,
-        "distance": meta.distance,
-        "metrics": sorted(meta.metrics) if meta.metrics else None,
-        "device_name": creator.name if creator else None,
-        "device_type": creator.device_type if creator else None,
-    }
+    return _catalog_row(path, read_parquet_metadata(path))
 
 
 # ---------------------------------------------------------------------------

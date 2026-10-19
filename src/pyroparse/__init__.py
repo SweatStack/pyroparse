@@ -16,7 +16,7 @@ from pyroparse._messages import all_messages
 from pyroparse._metadata import ActivityMetadata, CourseMetadata, Device, Waypoint
 from pyroparse._schema import STANDARD_COLUMNS
 from pyroparse._session import Session
-from pyroparse._summary import Athlete
+from pyroparse._summary import Athlete, SessionSummary
 from pyroparse._types import Source
 
 __version__ = _version("pyroparse")
@@ -33,6 +33,7 @@ __all__ = [
     "FileTypeMismatchError",
     "MultipleActivitiesError",
     "Session",
+    "SessionSummary",
     "Source",
     "Sport",
     "Waypoint",
@@ -93,8 +94,12 @@ def read_csv(
     columns: list[str] | str | None = None,
     extra_columns: list[str] | None = None,
     missing: str = "raise",
+    deduplicate: bool = True,
 ) -> pa.Table:
-    """Read a CSV file and return the data as a PyArrow Table."""
+    """Read a CSV file and return the data as a PyArrow Table, sorted by
+    ``timestamp`` and, with ``deduplicate=True`` (default), one row per
+    timestamp, as for FIT."""
     return Activity.load_csv(
         source, columns=columns, extra_columns=extra_columns, missing=missing,
+        deduplicate=deduplicate,
     ).data

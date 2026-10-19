@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from open_sport_taxonomy import Sport
 from open_sport_taxonomy.platforms import garmin_fit
 
-from pyroparse._summary import Athlete
+from pyroparse._summary import Athlete, SessionSummary
 
 
 _MAX_UTC_OFFSET_S = 24 * 3600
@@ -48,7 +48,12 @@ class Device:
 
 @dataclass
 class ActivityMetadata:
-    """Typed activity metadata parsed from FIT Session/DeviceInfo messages.
+    """Metadata of one session: what it is (the top level), what happened
+    (``summary``) and what the recording device assumed about the athlete
+    (``athlete``).
+
+    On an activity opened from a FIT file (``open_fit``), ``summary`` is empty
+    until the records load: it is computed from them.
 
     The ``extra`` dict carries format- or sport-specific fields without a
     dedicated attribute:
@@ -69,11 +74,10 @@ class ActivityMetadata:
     name: str | None = None
     start_time: datetime | None = None
     start_time_local: datetime | None = None
-    duration: float | None = None
-    distance: float | None = None
     metrics: set[str] = field(default_factory=set)
     devices: list[Device] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
+    summary: SessionSummary = field(default_factory=SessionSummary)
     athlete: Athlete = field(default_factory=Athlete)
 
     @property
@@ -104,13 +108,20 @@ class ActivityMetadata:
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "start_time_local": self.start_time_local.isoformat() if self.start_time_local else None,
             "utc_offset": self.utc_offset,
-            "duration": self.duration,
-            "distance": self.distance,
             "metrics": sorted(self.metrics),
             "devices": [d.to_dict() for d in self.devices],
             "extra": self.extra,
+            "summary": self.summary.to_dict(),
             "athlete": self.athlete.to_dict(),
         }
+
+    def _fill(self, loaded: ActivityMetadata) -> None:
+        """Take every field from *loaded*, in place, so references to this
+        object see the loaded metadata (``open_fit``, when the records load)."""
+        for f in fields(self):
+            setattr(self, f.name, getattr(loaded, f.name))
+
+    # -- Repr ---------------------------------------------------------------------
 
     def _summary_parts(self) -> list[str]:
         """Build the common summary tokens used by both Activity and
@@ -120,12 +131,13 @@ class ActivityMetadata:
             parts.append(self.sport)
         if self.start_time:
             parts.append(str(self.start_time.date()))
-        if self.duration is not None:
-            m, s = divmod(int(self.duration), 60)
+        summary = self.summary
+        if summary.duration is not None:
+            m, s = divmod(int(summary.duration), 60)
             h, m = divmod(m, 60)
             parts.append(f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}")
-        if self.distance is not None and self.distance > 0:
-            parts.append(f"{self.distance / 1000:.1f}km")
+        if summary.distance is not None and summary.distance > 0:
+            parts.append(f"{summary.distance / 1000:.1f}km")
         return parts
 
     def _repr(self, class_name: str) -> str:
@@ -219,15 +231,15 @@ def _merge_metadata(
     A ``sport`` override is validated and normalized so that
     ``ActivityMetadata.sport`` is always ``None`` or a canonical OST sport
     string, regardless of whether it came from the file or the caller.
-    ``athlete`` merges field by field when given as a dict
-    (``{"athlete": {"threshold_heart_rate": 170}}``) and is replaced when given
-    as an instance.
+    ``summary`` and ``athlete`` merge field by field when given as a dict
+    (``{"summary": {"calories": 900}}``) and are replaced when given as an
+    instance.
     """
     if not overrides:
         return base
     kwargs = {f.name: getattr(base, f.name) for f in fields(base)}
     for name, value in overrides.items():
-        if name == "athlete" and isinstance(value, dict):
+        if name in ("summary", "athlete") and isinstance(value, dict):
             kwargs[name] = replace(kwargs[name], **value)
         else:
             kwargs[name] = value
@@ -294,11 +306,10 @@ def _build_metadata(raw: dict) -> ActivityMetadata:
         name=raw.get("name"),
         start_time=start_time,
         start_time_local=start_time_local,
-        duration=raw.get("duration"),
-        distance=raw.get("distance"),
         metrics=metrics,
         devices=devices,
         extra=extra,
+        summary=SessionSummary._from_dict(raw.get("summary")),
         athlete=Athlete._from_dict(raw.get("athlete")),
     )
 

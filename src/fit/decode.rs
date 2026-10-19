@@ -17,6 +17,7 @@ use crate::fit::profile::{self, BaseType};
 use crate::reference::classify_developer_field;
 use crate::fields::{normalize_field_name, is_canonical_column, is_handled_field};
 use crate::types::{TypedColumn, promote_type, base_type_to_arrow, field_arrow_type, read_raw_f64};
+use crate::summary::{Interval, Kind, Value, SUMMARY_FIELDS};
 use crate::{
     AthleteMeta, SessionMeta, DeviceMeta, ScanResult, ParseResult,
     RecordRow, LapBoundary, LengthInterval, SEMICIRCLE_TO_DEGREES,
@@ -317,24 +318,6 @@ fn decode_session(def: &MessageDef, field_bytes: &[u8]) -> SessionMeta {
                     s.start_timestamp_us = Some(unix * 1_000_000);
                 }
             }
-            7 => {
-                // total_elapsed_time (field 7) — preferred (wall-clock, incl. pauses)
-                if let Some(v) = read_u32(data, be) {
-                    s.duration = Some(v as f64 / 1000.0);
-                }
-            }
-            8 if s.duration.is_none() => {
-                // total_timer_time (field 8) — fallback only if elapsed absent
-                if let Some(v) = read_u32(data, be) {
-                    s.duration = Some(v as f64 / 1000.0);
-                }
-            }
-            9 => {
-                // total_distance
-                if let Some(v) = read_u32(data, be) {
-                    s.distance = Some(v as f64 / 100.0);
-                }
-            }
             44 => {
                 // pool_length (uint16, scale 100, metres) — pool swims only.
                 if let Some(v) = read_u16(data, be) {
@@ -346,6 +329,20 @@ fn decode_session(def: &MessageDef, field_bytes: &[u8]) -> SessionMeta {
     }
 
     s
+}
+
+/// The Session fields the summary takes from the device or the athlete
+/// (`SUMMARY_FIELDS` of kind `Device` and `Entered`), read by profile name.
+/// Full parse only: on an opened file the summary loads with the records.
+fn decode_session_summary(def: &MessageDef, field_bytes: &[u8]) -> Vec<(&'static str, Value)> {
+    SUMMARY_FIELDS
+        .iter()
+        .filter(|f| f.kind != Kind::Computed)
+        .filter_map(|f| {
+            let v = read_field(def, field_bytes, profile::SESSION_FIELDS, f.source)?;
+            Some((f.name, Value::typed(f.ty, v / f.divisor)))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +389,71 @@ fn resolve_athlete(sessions: &mut [SessionMeta], zones: &[SessionZones]) {
         athlete.threshold_heart_rate =
             zone.athlete.threshold_heart_rate.or(athlete.threshold_heart_rate);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Running time — timer events
+// ---------------------------------------------------------------------------
+
+/// An event of timer group 0. The FIT profile (Types → `event`) puts three
+/// events there: `timer` ("Group 0. Start / stop_all"), `power_down` and
+/// `power_up` (both "stop_all group 0").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimerEvent {
+    Start,
+    Stop,
+    /// The device restarted after a crash or power loss.
+    PowerUp,
+}
+
+fn decode_timer_event(def: &MessageDef, field_bytes: &[u8]) -> Option<TimerEvent> {
+    let read = |name| read_field(def, field_bytes, profile::EVENT_FIELDS, name).map(|v| v as u8);
+    match profile::event_name(read("event")?) {
+        "timer" => match profile::event_type_name(read("event_type")?) {
+            "start" => Some(TimerEvent::Start),
+            "stop" | "stop_all" | "stop_disable" | "stop_disable_all" => Some(TimerEvent::Stop),
+            _ => None,
+        },
+        "power_down" => Some(TimerEvent::Stop),
+        "power_up" => Some(TimerEvent::PowerUp),
+        _ => None,
+    }
+}
+
+/// The file's running intervals from its timer events (µs, file order): a
+/// `timer` start opens one and any group-0 stop closes it. A `power_up`
+/// closes it at the last record before it — the device went down at a power
+/// loss the file does not record — the one inference in the model. An
+/// interval still open at the end runs on (`i64::MAX`): `summarize` cuts the
+/// file's intervals to each session. `None` when the file has no `timer`
+/// start: all time counts as running.
+fn running_intervals(events: &[(i64, TimerEvent)], records: &[RecordRow]) -> Option<Vec<Interval>> {
+    if !events.iter().any(|&(_, e)| e == TimerEvent::Start) {
+        return None;
+    }
+    let mut intervals = Vec::new();
+    let mut open: Option<i64> = None;
+    for &(at, event) in events {
+        match event {
+            TimerEvent::Start => {
+                open.get_or_insert(at);
+            }
+            TimerEvent::Stop => intervals.extend(open.take().map(|start| (start, at))),
+            TimerEvent::PowerUp => {
+                if let Some(start) = open.take() {
+                    let last_record = records
+                        .iter()
+                        .filter_map(|r| r.timestamp)
+                        .filter(|&t| t <= at)
+                        .max()
+                        .unwrap_or(start);
+                    intervals.push((start, last_record.max(start)));
+                }
+            }
+        }
+    }
+    intervals.extend(open.map(|start| (start, i64::MAX)));
+    Some(intervals)
 }
 
 // ---------------------------------------------------------------------------
@@ -854,7 +916,9 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                     }
                     profile::MESG_RECORD => { n_rows += 1; }
                     profile::MESG_SESSION => {
-                        sessions.push(decode_session(def, field_bytes));
+                        let mut session = decode_session(def, field_bytes);
+                        session.summary = decode_session_summary(def, field_bytes);
+                        sessions.push(session);
                     }
                     profile::MESG_TIME_IN_ZONE => {
                         zones.extend(decode_time_in_zone(def, field_bytes, section_base));
@@ -941,6 +1005,7 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
     let mut records = Vec::with_capacity(n_rows);
     let mut row_idx = 0usize;
     let mut base_timestamp: Option<u32> = None;
+    let mut timer_events: Vec<(i64, TimerEvent)> = Vec::new();
 
     // Rebuild developer field registrations during pass 2 so lookups follow
     // file order (a developer_data_index may be reassigned mid-file).
@@ -967,14 +1032,26 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
 
         if def.global_message_number != profile::MESG_RECORD {
             // Track timestamps from non-Record messages.
+            let mut own_timestamp = None;
             for (num, fdata) in FieldIter::new(def, field_bytes) {
                 if num == 253 {
                     if let Some(ts) = read_u32(fdata, def.big_endian) {
                         base_timestamp = Some(ts);
+                        own_timestamp = Some(ts);
                     }
                 }
             }
             match def.global_message_number {
+                profile::MESG_EVENT => {
+                    // A compressed header carries the event's time as an offset.
+                    let at = match time_offset {
+                        Some(offset) => resolve_compressed_timestamp(&mut base_timestamp, offset),
+                        None => own_timestamp,
+                    };
+                    if let (Some(at), Some(event)) = (at, decode_timer_event(def, field_bytes)) {
+                        timer_events.push(((at as i64 + profile::FIT_EPOCH_OFFSET) * 1_000_000, event));
+                    }
+                }
                 profile::MESG_DEVELOPER_DATA_ID => {
                     if let Some((idx, uuid)) = decode_developer_data_id(def, field_bytes) {
                         current_app_for_idx.insert(idx, uuid);
@@ -1142,6 +1219,7 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
 
     laps.sort_by_key(|l| l.start_time_us);
     lengths.sort_by_key(|l| l.start_time_us);
+    let running = running_intervals(&timer_events, &records);
 
     Ok(ParseResult {
         file_type,
@@ -1154,6 +1232,7 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
         laps,
         lengths,
         apps,
+        running,
     })
 }
 
@@ -1572,9 +1651,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_athlete_field_name_resolves() {
+    fn every_summary_fit_name_resolves() {
+        for f in SUMMARY_FIELDS.iter().filter(|f| f.kind != Kind::Computed) {
+            assert!(
+                profile::SESSION_FIELDS.iter().any(|pf| pf.name == f.source),
+                "{} reads Session field {:?}, which the profile does not define",
+                f.name, f.source,
+            );
+        }
         for name in ["reference_mesg", "reference_index", "max_heart_rate", "threshold_heart_rate"] {
             assert!(profile::TIME_IN_ZONE_FIELDS.iter().any(|pf| pf.name == name), "{name}");
+        }
+        for name in ["event", "event_type"] {
+            assert!(profile::EVENT_FIELDS.iter().any(|pf| pf.name == name), "{name}");
+        }
+    }
+
+    mod running_time {
+        use super::*;
+        use TimerEvent::{PowerUp, Start, Stop};
+
+        fn records(ts: &[i64]) -> Vec<RecordRow> {
+            ts.iter().map(|&t| RecordRow { timestamp: Some(t), ..Default::default() }).collect()
+        }
+
+        #[test]
+        fn starts_and_stops() {
+            let events = [(0, Start), (10, Stop), (20, Start), (30, Stop)];
+            assert_eq!(running_intervals(&events, &[]), Some(vec![(0, 10), (20, 30)]));
+        }
+
+        #[test]
+        fn a_repeated_start_or_stop_changes_nothing() {
+            let events = [(0, Start), (5, Start), (10, Stop), (12, Stop)];
+            assert_eq!(running_intervals(&events, &[]), Some(vec![(0, 10)]));
+        }
+
+        #[test]
+        fn an_open_interval_runs_on() {
+            assert_eq!(running_intervals(&[(7, Start)], &[]), Some(vec![(7, i64::MAX)]));
+        }
+
+        #[test]
+        fn power_up_ends_at_the_last_record_before_it() {
+            let events = [(0, Start), (45, PowerUp), (50, Start), (100, Stop)];
+            let recs = records(&[0, 10, 30, 50, 100]);
+            assert_eq!(running_intervals(&events, &recs), Some(vec![(0, 30), (50, 100)]));
+        }
+
+        #[test]
+        fn no_timer_start_means_no_timer() {
+            assert_eq!(running_intervals(&[], &[]), None);
+            assert_eq!(running_intervals(&[(3, Stop), (5, PowerUp)], &[]), None);
         }
     }
 
@@ -1590,7 +1718,6 @@ mod tests {
         let session = &result.sessions[0];
         assert!(session.sport.is_some(), "expected sport");
         assert!(session.start_time.is_some(), "expected start_time");
-        assert!(session.duration.is_some(), "expected duration");
         assert!(!result.record_metrics.is_empty(), "expected metrics");
     }
 

@@ -155,7 +155,7 @@ def bench_one(fit_path: Path, pq_path: Path) -> FileResult:
     return FileResult(
         file_name=fit_path.name,
         sport=meta.sport or "unknown",
-        duration_s=meta.duration or 0,
+        duration_s=meta.summary.duration or 0,
         fit_bytes=fit_path.stat().st_size,
         parquet_bytes=pq_path.stat().st_size,
         num_rows=num_rows,

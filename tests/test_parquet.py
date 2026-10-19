@@ -17,8 +17,8 @@ class TestParquetRoundtrip:
         assert loaded.data.equals(original.data)
         assert loaded.metadata.sport == original.metadata.sport
         assert loaded.metadata.start_time == original.metadata.start_time
-        assert loaded.metadata.duration == original.metadata.duration
-        assert loaded.metadata.distance == original.metadata.distance
+        assert loaded.metadata.summary == original.metadata.summary
+        assert loaded.metadata.athlete == original.metadata.athlete
         assert loaded.metadata.metrics == original.metadata.metrics
 
     def test_metadata_override_on_load(self, fit_path, tmp_path):

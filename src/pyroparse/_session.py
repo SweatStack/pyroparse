@@ -1,19 +1,14 @@
 from __future__ import annotations
 
 import os
+from typing import Callable
 
 import pyarrow as pa
 
-from pyroparse._activity import (
-    Activity,
-    _filter_device_columns,
-    _parse_multi,
-)
+from pyroparse._activity import Activity, _call_parser, _check_file_type
 from pyroparse._core import parse_fit_metadata as _parse_fit_metadata
-from pyroparse._errors import FileTypeMismatchError
-from pyroparse._metadata import ActivityMetadata, _build_metadata
-from pyroparse._rows import finalize_rows
-from pyroparse._schema import select_columns
+from pyroparse._load import load_fit_activity
+from pyroparse._metadata import _build_metadata
 
 
 class Session:
@@ -38,14 +33,15 @@ class Session:
         missing: str = "raise",
         deduplicate: bool = True,
     ) -> Session:
-        pairs = _parse_multi(source)
-        activities: list[Activity] = []
-        for data, meta in pairs:
-            data = select_columns(data, columns, extra_columns, missing)
-            data = finalize_rows(data, deduplicate=deduplicate)
-            _filter_device_columns(meta, data)
-            activities.append(Activity(data, meta))
-        return cls(activities)
+        raw = _call_parser(source)
+        _check_file_type(raw)
+        return cls([
+            Activity(*load_fit_activity(
+                a, columns=columns, extra_columns=extra_columns, missing=missing,
+                deduplicate=deduplicate, overrides=None,
+            ))
+            for a in raw["activities"]
+        ])
 
     @classmethod
     def open_fit(
@@ -57,32 +53,32 @@ class Session:
         missing: str = "raise",
         deduplicate: bool = True,
     ) -> Session:
-        """Load metadata now, defer record data until ``.data`` is accessed."""
+        """Read the metadata now; load the records on first access to an
+        activity's ``.data``, which also fills its summary. The file is parsed
+        once, on the first such access to any of its activities."""
         resolved = str(os.fspath(path))
         raw = _parse_fit_metadata(resolved)
-        file_type = raw.get("file_type")
-        if file_type is not None and file_type != "activity":
-            raise FileTypeMismatchError("activity", file_type)
+        _check_file_type(raw)
         metas = [_build_metadata(a["metadata"]) for a in raw["activities"]]
 
-        # All activities share a single lazy parse — first .data access triggers it.
-        cache: dict[int, pa.Table] = {}
+        # All activities share a single lazy parse — the first load triggers
+        # it; each activity takes its part, releasing it.
+        parsed: dict[str, dict[int, dict]] = {}
 
-        def make_loader(idx: int, meta: ActivityMetadata):
+        def make_loader(idx: int) -> Callable[[], pa.Table]:
             def loader() -> pa.Table:
-                if not cache:
-                    for i, (data, _) in enumerate(_parse_multi(resolved)):
-                        cache[i] = data
-                data = select_columns(cache.pop(idx), columns, extra_columns, missing)
-                data = finalize_rows(data, deduplicate=deduplicate)
-                _filter_device_columns(meta, data)
+                if "activities" not in parsed:
+                    parsed["activities"] = dict(enumerate(_call_parser(resolved)["activities"]))
+                data, loaded = load_fit_activity(
+                    parsed["activities"][idx], columns=columns, extra_columns=extra_columns,
+                    missing=missing, deduplicate=deduplicate, overrides=None,
+                )
+                del parsed["activities"][idx]
+                metas[idx]._fill(loaded)
                 return data
             return loader
 
-        return cls([
-            Activity(None, meta, _loader=make_loader(i, meta))
-            for i, meta in enumerate(metas)
-        ])
+        return cls([Activity(None, meta, _loader=make_loader(i)) for i, meta in enumerate(metas)])
 
     def __repr__(self) -> str:
         sports = ", ".join(a.metadata.sport or "unknown" for a in self._activities)
