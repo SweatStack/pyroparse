@@ -311,7 +311,7 @@ The `extra` dict holds format- or sport-specific fields that don't earn a top-le
 
 | Field | Definition |
 |---|---|
-| `duration` | seconds from `start_time` to the session's end: its last record, or in a multi-session file the next session's start |
+| `duration` | seconds from `start_time` to the session's end: its last record, or in a multi-session file the next session's start (known even for a session without records) |
 | `timer_time` | seconds the timer ran, from the file's timer events; `None` without them (CSV, some devices) |
 | `distance` | the maximum of the `distance` column (m); for a pool swim, active lengths × pool length |
 | `avg_heart_rate`, `avg_power`, `avg_cadence`, `avg_speed`, `avg_temperature` | time-weighted mean over the time the timer ran |

@@ -111,7 +111,9 @@ pub(crate) type Interval = (i64, i64);
 /// sorted by `timestamp`, ties in file order (`finalize_rows`). The session
 /// spans `[start, end]`: `start` is its `start_time`, `end` the next
 /// session's `start_time` in a multi-session file; either defaults to the
-/// first or last sample. `running` is the file's timer intervals, `None`
+/// first or last sample. A span known from the file gives `duration` and
+/// `timer_time` without any sample (a session that is only a button press
+/// between two legs of a multisport file). `running` is the file's timer intervals, `None`
 /// when it has no timer events (all time counts as running);
 /// `pool_distance` the active Lengths × pool length of a pool swim whose
 /// distance was reconstructed.
@@ -124,7 +126,6 @@ pub(crate) type Interval = (i64, i64);
 /// - **Averages** are time-weighted; zeros count, nulls are skipped.
 /// - Without a usable `timestamp` column, the durations and averages are
 ///   `None`; maxima and `distance` are taken over all rows.
-/// - Fewer than two rows: every field `None`.
 ///
 /// Returns `(field name, value)` for every computed field that has a value.
 pub(crate) fn summarize(
@@ -153,9 +154,6 @@ pub(crate) fn summarize(
         }
         None => (0..batch.num_rows()).collect(),
     };
-    if rows.len() < 2 {
-        return Ok(Vec::new());
-    }
 
     let mut out = Vec::new();
     let mut put = |name: &'static str, v: Option<f64>| {
@@ -165,19 +163,22 @@ pub(crate) fn summarize(
         }
     };
 
-    // Seconds of running time between consecutive rows, when there is time.
-    let weights: Option<Vec<f64>> = timestamps.as_ref().map(|ts| {
+    // Seconds of running time each row counts for, when there is time.
+    let weights: Option<Vec<f64>> = timestamps.as_ref().and_then(|ts| {
         let times: Vec<i64> = rows.iter().map(|&i| ts.value(i)).collect();
-        let last_sample = *times.last().expect("two rows");
-        let first = start.filter(|&s| s <= last_sample).unwrap_or(times[0]);
-        let last = end.map_or(last_sample, |e| e.max(last_sample));
+        // The session's span: the file's bounds where it has them, else the
+        // samples'. A start after the last sample is not a start of these
+        // samples.
+        let last = match (end, times.last()) {
+            (Some(e), Some(&l)) => e.max(l),
+            (e, l) => e.or(l.copied())?,
+        };
+        let first = start.filter(|&s| s <= last).or(times.first().copied())?;
         let window = Window::new(first, last, running);
         put("duration", Some(seconds(last - first)));
         put("timer_time", running.map(|_| window.total()));
-        let mut weights: Vec<f64> =
-            times.windows(2).map(|w| window.between(w[0], w[1])).collect();
-        weights.push(window.between(last_sample, last));
-        weights
+        let next = times.iter().skip(1).copied().chain(std::iter::once(last));
+        Some(times.iter().zip(next).map(|(&t, n)| window.between(t, n)).collect())
     });
 
     for column in ["heart_rate", "power", "cadence", "speed", "temperature"] {
@@ -449,11 +450,33 @@ mod tests {
     }
 
     #[test]
-    fn fewer_than_two_rows_give_nothing() {
-        assert!(summarize(&table(&[0], &[Some(1)]), None, None, None, None).unwrap().is_empty());
-        assert!(summarize(&table(&[], &[]), None, None, None, None).unwrap().is_empty());
-        // Two rows under one timestamp are one row.
-        assert!(summarize(&table(&[3, 3], &[Some(1), Some(2)]), None, None, None, None).unwrap().is_empty());
+    fn a_session_without_samples_has_its_span() {
+        // A sport button pressed between two legs: no records, but the file
+        // says the session ran from 100 s to 104 s, with the timer running.
+        let t = table(&[], &[]);
+        let out = summarize(&t, Some(100 * S), Some(104 * S), Some(&[(0, i64::MAX)]), None).unwrap();
+        assert_eq!(float(&out, "duration"), 4.0);
+        assert_eq!(float(&out, "timer_time"), 4.0);
+        assert_eq!(get(&out, "avg_power"), None);
+        assert_eq!(get(&out, "max_power"), None);
+        // The last session of a file has no end without samples.
+        assert!(summarize(&t, Some(100 * S), None, None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_sample() {
+        let t = table(&[3], &[Some(250)]);
+        let out = summarize(&t, None, None, None, None).unwrap();
+        assert_eq!(float(&out, "duration"), 0.0);
+        assert_eq!(get(&out, "avg_power"), None); // it counts for no time
+        assert_eq!(get(&out, "max_power"), Some(Value::Int(250)));
+        // Within a known span it counts until the session's end.
+        let out = summarize(&t, Some(0), Some(10 * S), None, None).unwrap();
+        assert_eq!(float(&out, "duration"), 10.0);
+        assert_eq!(float(&out, "avg_power"), 250.0);
+        // Two rows under one timestamp are one sample.
+        let out = summarize(&table(&[3, 3], &[Some(1), Some(2)]), None, None, None, None).unwrap();
+        assert_eq!(get(&out, "max_power"), Some(Value::Int(2)));
     }
 
     #[test]

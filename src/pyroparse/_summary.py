@@ -31,7 +31,9 @@ class SessionSummary:
     reconstructed). One definition for every device and every source:
 
     - ``duration`` — seconds from ``start_time`` to the session's end: its
-      last record, or in a multi-session file the next session's start.
+      last record, or in a multi-session file the next session's start (so a
+      session without records, such as a button pressed between two legs,
+      still has one).
     - ``timer_time`` — the time the timer ran, from the file's timer events,
       in seconds. ``None`` without timer events (CSV, some devices).
     - ``distance`` — the maximum of the ``distance`` column, in metres; for a

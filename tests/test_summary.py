@@ -29,6 +29,7 @@ from fit_builder import (
     FitBuilder,
     file_id,
     fit_time,
+    session,
     timer_event,
 )
 
@@ -183,6 +184,34 @@ class TestRunningTime:
         assert summary.timer_time is None
         assert summary.duration == 30
         assert summary.avg_power == pytest.approx((10 * 100 + 20 * 200) / 30)
+
+
+class TestSessionSpan:
+    """A multi-session session spans [its start_time, the next one's], so it has
+    a duration without records: a sport button pressed between two legs."""
+
+    @staticmethod
+    def _brick() -> bytes:
+        b = FitBuilder()
+        file_id(b, 0)
+        b.define(1, RECORD, [(253, UINT32, 4), (7, UINT16, 2)])
+        timer_event(b, 2, T0, *START)
+        for t in [*range(0, 61), *range(65, 101)]:
+            b.data(1, [fit_time(T0 + timedelta(seconds=t)), 100])
+        timer_event(b, 2, T0 + timedelta(seconds=100), *STOP)
+        for i, (start, elapsed) in enumerate([(0, 61), (61, 4), (65, 35)]):
+            session(b, 3 + i, T0 + timedelta(seconds=start), elapsed)
+        return b.build()
+
+    def test_a_session_without_records(self):
+        press = Session.load_fit(self._brick()).activities[1]
+        assert press.data.num_rows == 0
+        assert press.metadata.summary == SessionSummary(duration=4.0, timer_time=4.0)
+
+    def test_the_legs_around_it(self):
+        first, _, last = Session.load_fit(self._brick()).activities
+        assert (first.metadata.summary.duration, first.metadata.summary.timer_time) == (61.0, 61.0)
+        assert (last.metadata.summary.duration, last.metadata.summary.timer_time) == (35.0, 35.0)
 
 
 # ---------------------------------------------------------------------------
