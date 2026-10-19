@@ -606,19 +606,39 @@ maturin develop --release
 
 ### Releasing
 
-Releases are automated via GitHub Actions. On tag push:
+Releases are tag-driven. Pushing a `v*` tag runs `.github/workflows/ci.yml`: the test suite (Rust and Python), one stable-ABI (`abi3`) wheel per platform — Linux (x86_64, aarch64; manylinux and musllinux), macOS (x86_64, arm64) and Windows (x86_64), each tested on every CPython listed in `[tool.cibuildwheel] build` (3.10–3.15; add the next CPython there when it is released) — and the sdist. Only when every job passes does it publish to PyPI, through trusted publishing (OIDC) from the `pypi` environment.
 
-1. CI runs the full test suite
-2. One stable-ABI (`abi3`) wheel is built per platform — Linux (x86_64, aarch64), macOS (x86_64, arm64), and Windows (x86_64) — and tested on every CPython listed in `[tool.cibuildwheel] build` (3.10–3.15); add the next CPython there when it is released
-3. All artifacts are published to PyPI via trusted publisher (OIDC)
+1. **Push `main` and wait for CI to pass.** A push to `main` runs the same jobs without publishing. Tagging a commit that then fails CI publishes nothing, but leaves a tag that has to be deleted and recreated.
 
-```bash
-# 1. Bump version in pyproject.toml and Cargo.toml
-# 2. Commit and tag
-git commit -am "Release v0.4.0"
-git tag v0.4.0
-git push && git push --tags
-```
+   ```bash
+   git push origin main
+   ```
+
+2. **Make the release commit**, changing exactly:
+   - `version` in `pyproject.toml` (maturin takes the package version from there; `Cargo.toml`'s version is not used);
+   - `uv.lock`, by running `uv lock`;
+   - the CHANGELOG heading `## [Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD`.
+
+   ```bash
+   uv lock
+   git commit -am "Release X.Y.Z"
+   ```
+
+3. **Tag the release commit and push it.**
+
+   ```bash
+   git tag vX.Y.Z
+   git push origin main
+   git push origin vX.Y.Z
+   ```
+
+   If the `pypi` environment requires a reviewer, approve the deployment in the Actions run.
+
+4. **Check PyPI**: the sdist and seven `cp310-abi3` wheels. Then install the release on the newest Python:
+
+   ```bash
+   uvx --python 3.15 --with pyroparse==X.Y.Z python -c "import pyroparse; print(pyroparse.__version__)"
+   ```
 
 To build wheels locally for testing (requires Docker for Linux targets):
 
