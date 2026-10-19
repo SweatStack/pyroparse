@@ -15,7 +15,7 @@ from pyroparse._core import summarize as _summarize
 from pyroparse._metadata import ActivityMetadata, _build_metadata, _merge_metadata
 from pyroparse._rows import finalize_rows
 from pyroparse._schema import select_columns
-from pyroparse._summary import _restrict
+from pyroparse._summary import _SOURCE_COLUMNS, _restrict
 
 
 def shape(
@@ -38,6 +38,10 @@ def shape(
     only the columns present.
     """
     if summary_inputs is not None:
+        # Sort and deduplicate only the columns returned or summarized.
+        returned = select_columns(table.schema.empty_table(), columns, extra_columns, "ignore")
+        wanted = set(returned.column_names) | _SOURCE_COLUMNS
+        table = table.select([c for c in table.column_names if c in wanted])
         table = finalize_rows(table, deduplicate=deduplicate)
         computed = _summarize(table, **summary_inputs)
         meta.summary = replace(meta.summary, **computed)

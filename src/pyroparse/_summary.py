@@ -18,6 +18,9 @@ _COMPUTED_SOURCE: dict[str, str] = {
     name: source for name, kind, source in _FIELDS if kind == "computed"
 }
 
+# The record columns the summary reads.
+_SOURCE_COLUMNS: frozenset[str] = frozenset(_COMPUTED_SOURCE.values())
+
 
 @dataclass
 class SessionSummary:
