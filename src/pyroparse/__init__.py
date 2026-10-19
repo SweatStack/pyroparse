@@ -16,6 +16,7 @@ from pyroparse._messages import all_messages
 from pyroparse._metadata import ActivityMetadata, CourseMetadata, Device, Waypoint
 from pyroparse._schema import STANDARD_COLUMNS
 from pyroparse._session import Session
+from pyroparse._summary import Athlete
 from pyroparse._types import Source
 
 __version__ = _version("pyroparse")
@@ -24,6 +25,7 @@ __all__ = [
     "__version__",
     "Activity",
     "ActivityMetadata",
+    "Athlete",
     "ConvertResult",
     "Course",
     "CourseMetadata",

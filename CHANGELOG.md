@@ -18,6 +18,10 @@ Types of changes:
 
 ## [Unreleased]
 
+### Added
+- **`metadata.athlete`** (`Athlete`): `max_heart_rate` and `threshold_heart_rate` the device applied to the session, from its `time_in_zone` message; sport-specific, `None` when not set (Garmin writes 0). Read by both `load_fit` and the `open_fit` scan, resolved per section in chained files, included in `to_dict()` and the Parquet metadata (`$.athlete`). `metadata={"athlete": {…}}` merges field by field; an instance replaces.
+- `docs/FIT-FORMAT.md`: `time_in_zone`, its 0 sentinel, and per-section message indices in chained files.
+
 ### Fixed
 - **`load_fit_batch` and `scan_fit` parse files in parallel.** The Rust decoder held the GIL, so their threads ran one at a time.
 

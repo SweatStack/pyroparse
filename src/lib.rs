@@ -322,6 +322,15 @@ pub(crate) struct SessionMeta {
     /// Anchors per-record distance reconstruction — see [`assign_lengths`].
     pub(crate) pool_length: Option<f64>,
     pub(crate) start_timestamp_us: Option<i64>,
+    pub(crate) athlete: AthleteMeta,
+}
+
+/// What the recording device assumed about the athlete for one session, from
+/// its `time_in_zone` message (see `resolve_athlete`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AthleteMeta {
+    pub(crate) max_heart_rate: Option<i64>,
+    pub(crate) threshold_heart_rate: Option<i64>,
 }
 
 #[derive(Clone, Default)]
@@ -953,6 +962,10 @@ fn session_to_dict<'py>(
     dict.set_item("duration", session.duration)?;
     dict.set_item("distance", session.distance)?;
     dict.set_item("pool_length", session.pool_length)?;
+    let athlete = PyDict::new_bound(py);
+    athlete.set_item("max_heart_rate", session.athlete.max_heart_rate)?;
+    athlete.set_item("threshold_heart_rate", session.athlete.threshold_heart_rate)?;
+    dict.set_item("athlete", athlete)?;
     Ok(dict)
 }
 

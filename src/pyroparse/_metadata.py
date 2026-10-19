@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 
 from open_sport_taxonomy import Sport
 from open_sport_taxonomy.platforms import garmin_fit
+
+from pyroparse._summary import Athlete
 
 
 _MAX_UTC_OFFSET_S = 24 * 3600
@@ -72,6 +74,7 @@ class ActivityMetadata:
     metrics: set[str] = field(default_factory=set)
     devices: list[Device] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
+    athlete: Athlete = field(default_factory=Athlete)
 
     @property
     def utc_offset(self) -> int | None:
@@ -106,6 +109,7 @@ class ActivityMetadata:
             "metrics": sorted(self.metrics),
             "devices": [d.to_dict() for d in self.devices],
             "extra": self.extra,
+            "athlete": self.athlete.to_dict(),
         }
 
     def _summary_parts(self) -> list[str]:
@@ -215,11 +219,18 @@ def _merge_metadata(
     A ``sport`` override is validated and normalized so that
     ``ActivityMetadata.sport`` is always ``None`` or a canonical OST sport
     string, regardless of whether it came from the file or the caller.
+    ``athlete`` merges field by field when given as a dict
+    (``{"athlete": {"threshold_heart_rate": 170}}``) and is replaced when given
+    as an instance.
     """
     if not overrides:
         return base
     kwargs = {f.name: getattr(base, f.name) for f in fields(base)}
-    kwargs.update(overrides)
+    for name, value in overrides.items():
+        if name == "athlete" and isinstance(value, dict):
+            kwargs[name] = replace(kwargs[name], **value)
+        else:
+            kwargs[name] = value
     if "sport" in overrides:
         kwargs["sport"] = _normalize_sport_override(overrides["sport"])
     return ActivityMetadata(**kwargs)
@@ -288,6 +299,7 @@ def _build_metadata(raw: dict) -> ActivityMetadata:
         metrics=metrics,
         devices=devices,
         extra=extra,
+        athlete=Athlete._from_dict(raw.get("athlete")),
     )
 
 

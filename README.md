@@ -37,6 +37,7 @@ activity.metadata.duration      # 3842.7 (seconds)
 activity.metadata.distance      # 45230.5 (meters)
 activity.metadata.metrics       # {"heart_rate", "power", "speed", "cadence", "gps"}
 activity.metadata.devices       # [Device(garmin edge_540 (creator), columns=[heart_rate,power])]
+activity.metadata.athlete.threshold_heart_rate  # 167 (what the watch assumed)
 
 activity.data                   # pyarrow.Table — 21,666 rows × 11 typed columns
 ```
@@ -285,6 +286,7 @@ class ActivityMetadata:
     metrics: set[str]               # {"heart_rate", "power", "speed", "cadence", "gps"}
     devices: list[Device]           # head unit + connected sensors
     extra: dict                     # sub_sport, anything format-specific
+    athlete: Athlete                # what the device assumed, see Athlete
 ```
 
 `start_time_local` comes from the FIT Activity message, which records the activity's end in both UTC and local time; the difference is applied to the session start. It is `None` when a file has no Activity message (for example a truncated recording). `utc_offset` is that difference in seconds (`7200` for UTC+2), derived from `start_time` and `start_time_local`; it is `None` when either is, or when they are more than 24 hours apart.
@@ -292,6 +294,15 @@ class ActivityMetadata:
 `metrics` lists the columns that recorded something: at least one non-null, **non-zero** value. A sensor that was connected but idle, writing only zeros, did not record its metric; the column itself is left as written. (A column that is legitimately zero on every record, such as a temperature of exactly 0 °C throughout, drops out of `metrics` too.)
 
 The `extra` dict holds format- or sport-specific fields that don't earn a top-level attribute: `sub_sport` (e.g. `"lap_swimming"`); for pool swims, `pool_length` (metres) and `reconstructed_columns` (which record columns were derived from Length messages rather than measured; see [Swimming](#swimming)); and for indoor rowing, `cleaned_columns` (see [Rowing](#rowing)).
+
+### Athlete
+
+```python
+activity.metadata.athlete.max_heart_rate        # 189
+activity.metadata.athlete.threshold_heart_rate  # 167
+```
+
+The heart rates the recording device applied to the session, from its `time_in_zone` message. They are not measured in the activity: a watch keeps them per sport and updates them from its own estimates or the athlete's settings, so they are as of this session, specific to its sport (a brick's cycling and rowing sessions can differ), possibly out of date, and the file does not record their origin. `None` when the device wrote none; Apple Watch writes only the maximum and Zwift neither.
 
 ### Devices
 
@@ -328,6 +339,7 @@ activity = pp.Activity.load_fit("ride.fit", metadata={"sport": "cycling.gravel"}
 activity.metadata.sport       # "cycling.gravel" (overridden)
 activity.metadata.duration    # 3842.7           (preserved from FIT)
 
+pp.Activity.load_fit("ride.fit", metadata={"athlete": {"threshold_heart_rate": 170}})  # merges
 pp.Activity.load_fit("ride.fit", metadata={"sport": "gravel"})  # ValueError: invalid sport
 ```
 

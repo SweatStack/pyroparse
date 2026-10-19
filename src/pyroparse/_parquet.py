@@ -9,6 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from pyroparse._metadata import ActivityMetadata, Device
+from pyroparse._summary import Athlete
 from pyroparse._types import Source
 
 _METADATA_KEY = b"pyroparse"
@@ -116,4 +117,5 @@ def _json_to_metadata(raw: bytes) -> ActivityMetadata:
         metrics=set(data.get("metrics", [])),
         devices=devices,
         extra=data.get("extra", {}),
+        athlete=Athlete._from_dict(data.get("athlete")),
     )

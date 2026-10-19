@@ -341,6 +341,7 @@ documented and the value is physically impossible:
 | Field | Written | Why |
 |-------|---------|-----|
 | SmO2 (record field 57, `saturated_hemoglobin_percent`, and developer fields folded into `smo2`) | `0` | The ANT+ muscle-oxygen profile has its own "no reading" codes; devices and Connect IQ apps map them to 0 on the way into the file. 0 % saturation is physiologically impossible. |
+| `time_in_zone` `max_heart_rate` (11) and `threshold_heart_rate` (13) | `0` | Garmin writes `threshold_heart_rate = 0` for a sport without one set (`cycling-running-rapid-9session.fit`: cycling 0, running 170). A heart rate of 0 bpm is not a setting. |
 
 `core_temperature` would qualify on the same grounds (0 °C), but no device
 has been seen to write it, so no rule applies.
@@ -901,6 +902,11 @@ carried in from earlier sessions. The last distance before the session's
 it; a lower first distance means the device restarted (`rebase_session_distance`
 in `src/lib.rs`).
 
+Message indices count within their own section. `time_in_zone`'s
+`reference_index` names the n-th Session message *of its FIT file*, so in a
+chained file it resolves against the sessions of earlier sections plus that
+index (`decode_time_in_zone` in `src/fit/decode.rs`).
+
 ---
 
 ## 22. Activity file structure
@@ -1120,6 +1126,24 @@ Timer start/stop, gear changes, recovery HR measurements.
 | 0 | event | enum | — | — |
 | 1 | event_type | enum | — | — |
 | 3 | data | uint32 | — | — |
+
+### time_in_zone (global #216)
+
+The heart rates (and power) the device applied when computing time in zones,
+written per session and per lap.
+
+| Field # | Name | Type | Scale | Units |
+|---------|------|------|-------|-------|
+| 0 | reference_mesg | mesg_num (uint16) | — | `session` or `lap` |
+| 1 | reference_index | message_index (uint16) | — | index of that message in its FIT file |
+| 11 | max_heart_rate | uint8 | 1 | bpm |
+| 12 | resting_heart_rate | uint8 | 1 | bpm |
+| 13 | threshold_heart_rate | uint8 | 1 | bpm |
+| 15 | functional_threshold_power | uint16 | 1 | W |
+
+These are the device's settings or estimates as of the session and per sport,
+not measurements; `0` means not set (section 8). pyroparse reads the session
+entries into `metadata.athlete`.
 
 ### activity (global #34)
 

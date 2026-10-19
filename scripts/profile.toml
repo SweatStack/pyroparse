@@ -26,6 +26,7 @@ include = [
     "course_point",
     "developer_data_id",
     "field_description",
+    "time_in_zone",
 ]
 
 [subfields]

@@ -18,7 +18,7 @@ use crate::reference::classify_developer_field;
 use crate::fields::{normalize_field_name, is_canonical_column, is_handled_field};
 use crate::types::{TypedColumn, promote_type, base_type_to_arrow, field_arrow_type, read_raw_f64};
 use crate::{
-    SessionMeta, DeviceMeta, ScanResult, ParseResult,
+    AthleteMeta, SessionMeta, DeviceMeta, ScanResult, ParseResult,
     RecordRow, LapBoundary, LengthInterval, SEMICIRCLE_TO_DEGREES,
     CourseResult, CoursePoint, CourseMeta,
     classify_developer_sensors, bytes_to_uuid,
@@ -123,6 +123,31 @@ impl<'a> Iterator for FieldIter<'a> {
     }
 }
 
+/// Read a data message's field by its profile name, decoded as the profile
+/// says: the bytes with the base type the file's definition declares (that
+/// type's invalid value reads `None`), then `raw / scale - offset`. `None`
+/// when the message does not carry the field. No field number or scale is
+/// restated in code (AGENTS.md, "Resolve fields from the profile").
+fn read_field(
+    def: &MessageDef,
+    field_bytes: &[u8],
+    table: &[profile::FieldDef],
+    name: &str,
+) -> Option<f64> {
+    let pf = table.iter().find(|f| f.name == name)?;
+    let mut offset = 0usize;
+    for field in &def.fields {
+        let end = offset + field.size as usize;
+        if field.number == pf.number {
+            let data = field_bytes.get(offset..end)?;
+            let raw = read_raw_f64(data, BaseType::from_byte(field.base_type), def.big_endian)?;
+            return Some(raw / pf.scale - pf.offset);
+        }
+        offset = end;
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Metadata scanner
 // ---------------------------------------------------------------------------
@@ -153,6 +178,8 @@ pub fn scan_metadata(data: &[u8]) -> Result<ScanResult, String> {
     let mut current_app_for_idx: BTreeMap<u8, String> = BTreeMap::new();
     let mut dev_field_owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut utc_offsets: Vec<UtcOffset> = Vec::new();
+    let mut zones: Vec<SessionZones> = Vec::new();
+    let mut section_base = 0usize;
 
     while let Some(event) = reader.next().map_err(|e| e.to_string())? {
         match event {
@@ -183,6 +210,9 @@ pub fn scan_metadata(data: &[u8]) -> Result<ScanResult, String> {
                     profile::MESG_SESSION => {
                         result.sessions.push(decode_session(def, field_bytes));
                     }
+                    profile::MESG_TIME_IN_ZONE => {
+                        zones.extend(decode_time_in_zone(def, field_bytes, section_base));
+                    }
                     profile::MESG_ACTIVITY => {
                         if let Some(offset) = decode_activity_offset(def, field_bytes) {
                             utc_offsets.push(offset);
@@ -209,10 +239,12 @@ pub fn scan_metadata(data: &[u8]) -> Result<ScanResult, String> {
                 }
             }
 
-            FitEvent::FileHeader(_) | FitEvent::Crc { .. } => {
-                // No state reset needed for metadata scan — sessions and
-                // devices accumulate across chained sections.
+            FitEvent::FileHeader(_) => {
+                // Sessions and devices accumulate across chained sections;
+                // `time_in_zone` indices count from each section's first session.
+                section_base = result.sessions.len();
             }
+            FitEvent::Crc { .. } => {}
         }
     }
 
@@ -226,6 +258,7 @@ pub fn scan_metadata(data: &[u8]) -> Result<ScanResult, String> {
     );
 
     resolve_local_start_times(&mut result.sessions, &utc_offsets);
+    resolve_athlete(&mut result.sessions, &zones);
 
     Ok(result)
 }
@@ -313,6 +346,52 @@ fn decode_session(def: &MessageDef, field_bytes: &[u8]) -> SessionMeta {
     }
 
     s
+}
+
+// ---------------------------------------------------------------------------
+// Athlete — the heart rates the device applied to each session
+// ---------------------------------------------------------------------------
+
+/// A `time_in_zone` message (216) that describes a session.
+struct SessionZones {
+    /// Index of the session among all sessions of the (possibly chained) file.
+    session: usize,
+    athlete: AthleteMeta,
+}
+
+/// Decode a `time_in_zone` message whose `reference_mesg` is `session`;
+/// entries for laps are ignored. `reference_index` counts the Session
+/// messages of its own FIT file, so in a chained file it is offset by
+/// `section_base`, the sessions of the sections before it.
+fn decode_time_in_zone(def: &MessageDef, field_bytes: &[u8], section_base: usize) -> Option<SessionZones> {
+    let read = |name| read_field(def, field_bytes, profile::TIME_IN_ZONE_FIELDS, name);
+    if read("reference_mesg")? != f64::from(profile::MESG_SESSION) {
+        return None;
+    }
+    let index = read("reference_index")? as usize;
+    // 0 is "not set": Garmin writes `threshold_heart_rate = 0` for a sport
+    // without one. A device sentinel, read as missing (docs/FIT-FORMAT.md §8).
+    let heart_rate = |name| read(name).filter(|&v| v != 0.0).map(|v| v as i64);
+    Some(SessionZones {
+        session: section_base + index,
+        athlete: AthleteMeta {
+            max_heart_rate: heart_rate("max_heart_rate"),
+            threshold_heart_rate: heart_rate("threshold_heart_rate"),
+        },
+    })
+}
+
+/// Give each session the athlete values of its `time_in_zone` entry. An index
+/// beyond the file's sessions is ignored; a later entry for the same session
+/// overwrites the values it carries.
+fn resolve_athlete(sessions: &mut [SessionMeta], zones: &[SessionZones]) {
+    for zone in zones {
+        let Some(session) = sessions.get_mut(zone.session) else { continue };
+        let athlete = &mut session.athlete;
+        athlete.max_heart_rate = zone.athlete.max_heart_rate.or(athlete.max_heart_rate);
+        athlete.threshold_heart_rate =
+            zone.athlete.threshold_heart_rate.or(athlete.threshold_heart_rate);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -676,6 +755,8 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
     let mut current_app_for_idx: BTreeMap<u8, String> = BTreeMap::new();
     let mut dev_field_owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut utc_offsets: Vec<UtcOffset> = Vec::new();
+    let mut zones: Vec<SessionZones> = Vec::new();
+    let mut section_base = 0usize;
     // CIQ app UUIDs by slot; `DevFieldDesc::app` and the `RecordRow::*_app`
     // fields index into this.
     let mut apps: Vec<String> = Vec::new();
@@ -775,6 +856,9 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                     profile::MESG_SESSION => {
                         sessions.push(decode_session(def, field_bytes));
                     }
+                    profile::MESG_TIME_IN_ZONE => {
+                        zones.extend(decode_time_in_zone(def, field_bytes, section_base));
+                    }
                     profile::MESG_ACTIVITY => {
                         if let Some(offset) = decode_activity_offset(def, field_bytes) {
                             utc_offsets.push(offset);
@@ -814,13 +898,16 @@ pub fn full_parse(data: &[u8], config: &ParseConfig) -> Result<ParseResult, Stri
                 }
             }
 
-            FitEvent::FileHeader(_) | FitEvent::Crc { .. } => {}
+            // `time_in_zone` indices count from each chained section's first session.
+            FitEvent::FileHeader(_) => section_base = sessions.len(),
+            FitEvent::Crc { .. } => {}
         }
     }
 
     // Sessions may precede the Activity message that carries the UTC offset
     // (summary-first files), so local start times resolve after the pass.
     resolve_local_start_times(&mut sessions, &utc_offsets);
+    resolve_athlete(&mut sessions, &zones);
 
     // Build extra column info and lookup.
     let extra_col_info: Vec<(String, DataType)> = extra_types.into_iter().collect();
@@ -1483,6 +1570,13 @@ fn decode_record_dev_extras(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_athlete_field_name_resolves() {
+        for name in ["reference_mesg", "reference_index", "max_heart_rate", "threshold_heart_rate"] {
+            assert!(profile::TIME_IN_ZONE_FIELDS.iter().any(|pf| pf.name == name), "{name}");
+        }
+    }
 
     #[test]
     fn test_scan_basic_fit_file() {

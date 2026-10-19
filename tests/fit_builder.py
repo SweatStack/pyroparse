@@ -37,6 +37,7 @@ DEVICE_INFO = 23
 ACTIVITY = 34
 FIELD_DESCRIPTION = 206
 DEVELOPER_DATA_ID = 207
+TIME_IN_ZONE = 216
 
 # struct format and invalid sentinel per numeric base type (section 8).
 _NUMERIC = {
@@ -237,3 +238,20 @@ def device_info(
     ]
     b.define(local, DEVICE_INFO, fields)
     b.data(local, [index, device_type, manufacturer, serial, product, source_type, product_name])
+
+
+def time_in_zone(
+    b: FitBuilder,
+    local: int,
+    at: datetime,
+    session_index: int,
+    *,
+    max_heart_rate: int | None,
+    threshold_heart_rate: int | None,
+) -> None:
+    """time_in_zone for a session: ``reference_mesg`` = session,
+    ``reference_index``, ``max_heart_rate`` (11), ``threshold_heart_rate`` (13)."""
+    b.define(local, TIME_IN_ZONE, [
+        (253, UINT32, 4), (0, UINT16, 2), (1, UINT16, 2), (11, UINT8, 1), (13, UINT8, 1),
+    ])
+    b.data(local, [fit_time(at), SESSION, session_index, max_heart_rate, threshold_heart_rate])

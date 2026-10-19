@@ -91,6 +91,16 @@ class TestSessionParity:
             )
 
 
+    @pytest.mark.parametrize("filename,expected_count", FIXTURE_FILES)
+    def test_athlete(self, filename, expected_count):
+        # Both parsers read time_in_zone, so open_fit's athlete is load_fit's.
+        full, scan = _parse_both(filename)
+        for i in range(len(full)):
+            assert full[i]["metadata"]["athlete"] == scan[i]["metadata"]["athlete"], (
+                f"{filename} activity {i}: athlete mismatch"
+            )
+
+
 class TestDeviceParity:
     """Both parsers decode DeviceInfo with one decoder and group it per session
     the same way, so every activity lists the same devices. (The full parser
