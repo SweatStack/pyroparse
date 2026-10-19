@@ -16,7 +16,7 @@ Types of changes:
 - `Security` in case of vulnerabilities.
 
 
-## [Unreleased]
+## [0.11.0] - 2026-10-19
 
 ### Changed
 - **Session metadata is split into three parts** (plan 037): the top level says what the session is, `metadata.summary` what happened in it, `metadata.athlete` what the recording device assumed about the athlete. **Breaking:** `metadata.duration` → `metadata.summary.duration`, `metadata.distance` → `metadata.summary.distance`; `ActivityMetadata(duration=…, distance=…)` no longer accepts them, nor does `metadata={"duration": …}`.
